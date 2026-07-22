@@ -117,7 +117,7 @@
                             BorderThickness="1"
                             CornerRadius="4"
                             Padding="5,1"
-                            IsVisible="{Binding HasNextendoPlayersOnline}">
+                            IsVisible="{Binding IsNextendoCompatible}">
                             <ToolTip.Tip>
                                 <TextBlock Text="{Binding NextendoPlayersText}" />
                             </ToolTip.Tip>
