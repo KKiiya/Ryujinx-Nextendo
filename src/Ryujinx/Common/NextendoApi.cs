@@ -5,7 +5,10 @@ using System.IO;
 using Ryujinx.Common.Logging;
 using System;
 using System.Collections.Generic;
+using System.Net;
 using System.Net.Http;
+using System.Net.Sockets;
+using System.Security.Cryptography;
 using System.Text;
 using System.Text.Json;
 using System.Threading.Tasks;
@@ -32,6 +35,9 @@ namespace Ryujinx.Ava.Common
             public string Name = "";
             public string FriendCode = "";
             public string ImageBase64 = "";
+
+            /// <summary>True when the local account has starred this friend as a favorite (synced with the website).</summary>
+            public bool Favorite;
 
             /// <summary>Live presence from the account server: 0 = offline, non-zero = online.</summary>
             public int OnlineStatus;
@@ -556,6 +562,172 @@ namespace Ryujinx.Ava.Common
             }
         }
 
+        /// <summary>Stars/unstars a friend. Stored on the account → synced with the website.</summary>
+        public static async Task SetFavoriteAsync(ulong pid, bool favorite)
+        {
+            try
+            {
+                using HttpClient http = Client();
+                using StringContent body = new($"{{\"pid\":{pid},\"favorite\":{(favorite ? "true" : "false")}}}", Encoding.UTF8, "application/json");
+                await http.PostAsync($"{BaseUrl()}/api/friends/favorite", body);
+            }
+            catch (Exception ex)
+            {
+                Logger.Warning?.Print(LogClass.Application, $"[Nextendo] SetFavorite failed: {ex.Message}");
+            }
+        }
+
+        // -------------------------------------------------------------------
+        // [Nextendo] "Sign in with Nextendo" — OAuth 2.0 Authorization Code + PKCE with a loopback
+        // redirect (RFC 8252), the standard secure flow for a native desktop app (same idea as
+        // `gh auth login`). The emulator NEVER sees the password: the user authenticates in their
+        // browser on nextendo.network, and we only ever receive a short-lived code that we exchange
+        // (with PKCE) for the online token. This is what lets the website login sit behind Turnstile
+        // without ever blocking the emulator.
+
+        public static async Task<(bool ok, string error)> SignInWithBrowserAsync()
+        {
+            // PKCE (S256) + a CSRF `state` we verify on the way back.
+            string verifier = RandUrl(32);
+            string challenge = Base64Url(SHA256.HashData(Encoding.ASCII.GetBytes(verifier)));
+            string state = RandUrl(24);
+
+            // Loopback listener on a free port, 127.0.0.1 only (loopback needs no admin/URL ACL).
+            int port = FreeLoopbackPort();
+            string redirectUri = $"http://127.0.0.1:{port}/callback";
+            HttpListener listener = new();
+            listener.Prefixes.Add($"http://127.0.0.1:{port}/");
+            try
+            {
+                listener.Start();
+            }
+            catch (Exception ex)
+            {
+                return (false, $"Impossible d'ouvrir un port local : {ex.Message}");
+            }
+
+            string authorizeUrl =
+                $"{BaseUrl()}/api/oauth/authorize?response_type=code&client_id=nextendo-emulator" +
+                $"&redirect_uri={Uri.EscapeDataString(redirectUri)}&scope=identity+friends" +
+                $"&state={state}&code_challenge={challenge}&code_challenge_method=S256";
+
+            try
+            {
+                Ryujinx.Common.Helper.OpenHelper.OpenUrl(authorizeUrl);
+            }
+            catch (Exception ex)
+            {
+                listener.Close();
+                return (false, $"Impossible d'ouvrir le navigateur : {ex.Message}");
+            }
+
+            // Wait for the browser to hit the loopback callback (max 5 minutes).
+            HttpListenerContext ctx;
+            try
+            {
+                Task<HttpListenerContext> pending = listener.GetContextAsync();
+                if (await Task.WhenAny(pending, Task.Delay(TimeSpan.FromMinutes(5))) != pending)
+                {
+                    listener.Close();
+                    return (false, "Délai de connexion dépassé.");
+                }
+                ctx = await pending;
+            }
+            catch (Exception ex)
+            {
+                listener.Close();
+                return (false, ex.Message);
+            }
+
+            string code = ctx.Request.QueryString["code"];
+            string gotState = ctx.Request.QueryString["state"];
+            string oauthError = ctx.Request.QueryString["error"];
+            bool good = string.IsNullOrEmpty(oauthError) && !string.IsNullOrEmpty(code) && gotState == state;
+
+            await WriteLoopbackPageAsync(ctx, good);
+            listener.Close();
+
+            if (!string.IsNullOrEmpty(oauthError))
+            {
+                return (false, oauthError == "access_denied" ? "Connexion refusée." : oauthError);
+            }
+            if (string.IsNullOrEmpty(code))
+            {
+                return (false, "Aucun code reçu du navigateur.");
+            }
+            if (gotState != state)
+            {
+                return (false, "Vérification anti-CSRF échouée."); // never trust a mismatched state
+            }
+
+            // Exchange the code for the online token — public client, PKCE, no client secret.
+            try
+            {
+                using HttpClient http = new() { Timeout = TimeSpan.FromSeconds(15) };
+                using FormUrlEncodedContent form = new(new Dictionary<string, string>
+                {
+                    ["grant_type"] = "authorization_code",
+                    ["code"] = code,
+                    ["client_id"] = "nextendo-emulator",
+                    ["redirect_uri"] = redirectUri,
+                    ["code_verifier"] = verifier,
+                });
+                using HttpResponseMessage resp = await http.PostAsync($"{BaseUrl()}/api/oauth/token", form);
+                string json = await resp.Content.ReadAsStringAsync();
+                if (!resp.IsSuccessStatusCode)
+                {
+                    return (false, "Échec de l'échange du code d'autorisation.");
+                }
+
+                using JsonDocument doc = JsonDocument.Parse(json);
+                JsonElement root = doc.RootElement;
+                string nexToken = root.TryGetProperty("nex_token", out JsonElement nt) ? (nt.GetString() ?? "") : "";
+                if (string.IsNullOrEmpty(nexToken) || !root.TryGetProperty("account", out JsonElement acct))
+                {
+                    return (false, "Réponse d'authentification invalide.");
+                }
+                ulong pid = acct.GetProperty("pid").GetUInt64();
+                string username = acct.TryGetProperty("username", out JsonElement u) ? (u.GetString() ?? "") : "";
+                string friendCode = acct.TryGetProperty("friend_code", out JsonElement f) ? (f.GetString() ?? "") : "";
+
+                NextendoAccount.Save(pid, username, friendCode, nexToken);
+                return (true, "");
+            }
+            catch (Exception ex)
+            {
+                return (false, ex.Message);
+            }
+        }
+
+        private static async Task WriteLoopbackPageAsync(HttpListenerContext ctx, bool ok)
+        {
+            string inner = ok
+                ? "<h1 style='color:#33E86B'>✓ Connexion réussie</h1><p>Tu peux fermer cet onglet et retourner à l'émulateur Nextendo.</p>"
+                : "<h1 style='color:#ff8a8a'>Connexion annulée</h1><p>Retourne à l'émulateur Nextendo et réessaie.</p>";
+            byte[] buf = Encoding.UTF8.GetBytes(
+                "<!doctype html><meta charset=utf-8><title>Nextendo</title>" +
+                "<body style='font-family:system-ui,sans-serif;background:#0f1115;color:#e7e9ee;display:grid;place-items:center;height:100vh;margin:0'>" +
+                "<div style='text-align:center;max-width:420px'>" + inner + "</div>");
+            ctx.Response.ContentType = "text/html; charset=utf-8";
+            ctx.Response.ContentLength64 = buf.Length;
+            try { await ctx.Response.OutputStream.WriteAsync(buf); } catch { /* browser may have closed */ }
+            try { ctx.Response.OutputStream.Close(); } catch { }
+        }
+
+        private static int FreeLoopbackPort()
+        {
+            TcpListener l = new(IPAddress.Loopback, 0);
+            l.Start();
+            int port = ((IPEndPoint)l.LocalEndpoint).Port;
+            l.Stop();
+            return port;
+        }
+
+        private static string RandUrl(int nbytes) => Base64Url(RandomNumberGenerator.GetBytes(nbytes));
+
+        private static string Base64Url(byte[] b) =>
+            Convert.ToBase64String(b).TrimEnd('=').Replace('+', '-').Replace('/', '_');
+
         // Returns (ok, error).
         public static async Task<(bool ok, string message)> SetUsernameAsync(string username)
         {
@@ -626,6 +798,7 @@ namespace Ryujinx.Ava.Common
                 Name = f.TryGetProperty("name", out JsonElement n) ? (n.GetString() ?? "") : "",
                 FriendCode = f.TryGetProperty("friend_code", out JsonElement c) ? (c.GetString() ?? "") : "",
                 ImageBase64 = f.TryGetProperty("image", out JsonElement i) ? (i.GetString() ?? "") : "",
+                Favorite = f.TryGetProperty("favorite", out JsonElement fav) && fav.ValueKind == JsonValueKind.True,
             };
 
             // The account server has always sent live presence here; the client just never read
