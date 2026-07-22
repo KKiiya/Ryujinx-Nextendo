@@ -21,7 +21,7 @@ namespace Ryujinx.Ava.Common
     /// </summary>
     public static class NextendoOnlineCounts
     {
-        private static readonly TimeSpan _pollInterval = TimeSpan.FromSeconds(30);
+        private static readonly TimeSpan _pollInterval = TimeSpan.FromSeconds(5);
         private static readonly object _lock = new();
         private static Dictionary<string, int> _counts = new();
         private static Timer _timer;

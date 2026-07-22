@@ -797,6 +797,7 @@ namespace Ryujinx.Ava.UI.Windows
                 Executor.ExecuteBackgroundAsync(ApplicationLibrary.RefreshTotalTimePlayedAsync);
 
                 _isLoading = false;
+                _ = NextendoOnlineCounts.RefreshAsync();
             })
             {
                 Name = "GUI.ApplicationLibraryThread",

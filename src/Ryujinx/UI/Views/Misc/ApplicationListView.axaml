@@ -140,13 +140,13 @@
                                         </Border>
                                         <!-- [Nextendo] Live player count; hidden at zero. -->
                                         <Border
-                                            IsVisible="{Binding HasNextendoPlayersOnline}"
+                                            IsVisible="{Binding IsNextendoCompatible}"
                                             Background="#1833E86B"
                                             BorderBrush="#33E86B"
                                             BorderThickness="1"
                                             CornerRadius="4"
                                             Padding="6,1"
-                                            Margin="6,3,0,0"
+                                            Margin="0,3,0,0"
                                             HorizontalAlignment="Left">
                                             <StackPanel Orientation="Horizontal" Spacing="4">
                                                 <Ellipse Width="6" Height="6" Fill="#33E86B" VerticalAlignment="Center" />
