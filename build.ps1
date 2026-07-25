@@ -1,7 +1,34 @@
 $ErrorActionPreference = 'Stop'
 
+$DotEnvPath = Join-Path $PSScriptRoot '.env'
+if (Test-Path $DotEnvPath) {
+    Get-Content $DotEnvPath | ForEach-Object {
+        $line = $_.Trim()
+
+        if ([string]::IsNullOrWhiteSpace($line) -or $line.StartsWith('#')) {
+            return
+        }
+
+        $separatorIndex = $line.IndexOf('=')
+        if ($separatorIndex -lt 1) {
+            return
+        }
+
+        $name = $line.Substring(0, $separatorIndex).Trim()
+        $value = $line.Substring($separatorIndex + 1).Trim()
+
+        if ($value.Length -ge 2 -and (($value.StartsWith('"') -and $value.EndsWith('"')) -or ($value.StartsWith("'") -and $value.EndsWith("'")))) {
+            $value = $value.Substring(1, $value.Length - 2)
+        }
+
+        Set-Item -Path "Env:$name" -Value $value
+    }
+
+    Write-Host "Loaded environment variables from $DotEnvPath." -ForegroundColor DarkCyan
+}
+
 # Change this value to update the published application version for all platforms.
-$PublishVersion = '1.6.5'
+$PublishVersion = '1.6.7'
 $Configuration = 'Release'
 $ProjectPath = 'src/Ryujinx/Ryujinx.csproj'
 $SelfContained = 'true'
