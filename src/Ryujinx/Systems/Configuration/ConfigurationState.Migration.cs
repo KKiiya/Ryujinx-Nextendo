@@ -153,6 +153,9 @@ namespace Ryujinx.Ava.Systems.Configuration
             UI.WindowStartup.WindowMaximized.Value = shouldLoadFromFile ? cff.WindowStartup.WindowMaximized : UI.WindowStartup.WindowMaximized.Value;
             UI.PauseEmulationWhileScanningAmiibo.Value = cff.PauseEmulationWhileScanningAmiibo;
             UI.WallpaperPath.Value = shouldLoadFromFile ? (cff.WallpaperPath ?? string.Empty) : UI.WallpaperPath.Value;
+            UI.LibraryPresentation.Value = shouldLoadFromFile ? cff.LibraryPresentation : UI.LibraryPresentation.Value;
+            UI.ConsoleSection.Value = shouldLoadFromFile ? Math.Clamp(cff.ConsoleSection, 0, 2) : UI.ConsoleSection.Value;
+            UI.ConsoleReduceAnimations.Value = shouldLoadFromFile ? cff.ConsoleReduceAnimations : UI.ConsoleReduceAnimations.Value;
 
             Hid.EnableKeyboard.Value = cff.EnableKeyboard;
             Hid.EnableMouse.Value = cff.EnableMouse;
@@ -553,7 +556,15 @@ namespace Ryujinx.Ava.Systems.Configuration
                     cff.MultiplayerLanPlayServer = string.Empty;
                     cff.MultiplayerLanPlayVirtualIp = string.Empty;
                 }),
-                (75, static cff => cff.WallpaperPath = string.Empty)
+                (75, static cff => cff.WallpaperPath = string.Empty),
+                // 76: Console library presentation. Preserve existing behavior on upgrade:
+                // users on the old List/Grid views stay on Classic, Home users get Console.
+                (76, static cff =>
+                {
+                    cff.ConsoleSection = 0;
+                    cff.ConsoleReduceAnimations = false;
+                    cff.LibraryPresentation = cff.GameListViewMode == 6 ? 0 : 1;
+                })
             );
     }
 }

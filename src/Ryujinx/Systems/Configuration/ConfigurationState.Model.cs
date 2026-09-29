@@ -206,6 +206,21 @@ namespace Ryujinx.Ava.Systems.Configuration
             /// </summary>
             public ReactiveObject<string> WallpaperPath { get; private set; }
 
+            /// <summary>
+            /// Console vs Classic library presentation. 0 = Console (default), 1 = Classic.
+            /// </summary>
+            public ReactiveObject<int> LibraryPresentation { get; private set; }
+
+            /// <summary>
+            /// Selected Console-view section: 0 = Home, 1 = All Software, 2 = Favorites.
+            /// </summary>
+            public ReactiveObject<int> ConsoleSection { get; private set; }
+
+            /// <summary>
+            /// Reduces Console-view animations (accessibility / low-spec).
+            /// </summary>
+            public ReactiveObject<bool> ConsoleReduceAnimations { get; private set; }
+
             public UISection()
             {
                 GuiColumns = new Columns();
@@ -230,6 +245,9 @@ namespace Ryujinx.Ava.Systems.Configuration
                 PauseEmulationWhileScanningAmiibo = new ReactiveObject<bool>();
                 PauseEmulationWhileScanningAmiibo.Value = true;
                 WallpaperPath = new ReactiveObject<string>();
+                LibraryPresentation = new ReactiveObject<int>();
+                ConsoleSection = new ReactiveObject<int>();
+                ConsoleReduceAnimations = new ReactiveObject<bool>();
             }
         }
 

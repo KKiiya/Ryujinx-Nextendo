@@ -17,7 +17,7 @@ namespace Ryujinx.Ava.Systems.Configuration
         /// <summary>
         /// The current version of the file format
         /// </summary>
-        public const int CurrentVersion = 75;
+        public const int CurrentVersion = 76;
 
         /// <summary>
         /// Version of the configuration file format
@@ -530,6 +530,23 @@ namespace Ryujinx.Ava.Systems.Configuration
         /// [Nextendo] Path to the wallpaper image shown behind the Switch-style launcher
         /// </summary>
         public string WallpaperPath { get; set; }
+
+        /// <summary>
+        /// Console-style library presentation: 0 = Console view (HOME / All Software),
+        /// 1 = Classic view (existing List / Grid / Carousel). Backward compatible:
+        /// missing in old files deserializes to 0 (Console).
+        /// </summary>
+        public int LibraryPresentation { get; set; }
+
+        /// <summary>
+        /// Selected section inside the Console view: 0 = Home (Recent), 1 = All Software, 2 = Favorites.
+        /// </summary>
+        public int ConsoleSection { get; set; }
+
+        /// <summary>
+        /// When true, the Console view skips selection/scale/background animations.
+        /// </summary>
+        public bool ConsoleReduceAnimations { get; set; }
 
         /// <summary>
         /// Loads a configuration file from disk
