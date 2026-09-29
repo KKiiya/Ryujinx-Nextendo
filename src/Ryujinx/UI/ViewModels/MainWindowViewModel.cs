@@ -2578,10 +2578,10 @@ namespace Ryujinx.Ava.UI.ViewModels
                 WindowState = WindowState.Normal;
                 Window.TitleBar.ExtendsContentIntoTitleBar = !ConfigurationState.Instance.ShowOldUI;
 
-                if (IsGameRunning)
-                {
-                    ShowMenuAndStatusBar = true;
-                }
+                // Leaving fullscreen always brings the menu/status back: in-game this
+                // preserves the previous behavior, in the library it restores the
+                // chrome hidden on the way in (see below).
+                ShowMenuAndStatusBar = true;
 
                 if (OperatingSystem.IsWindows())
                 {
@@ -2592,10 +2592,11 @@ namespace Ryujinx.Ava.UI.ViewModels
             {
                 Window.TitleBar.ExtendsContentIntoTitleBar = true;
 
-                if (IsGameRunning)
-                {
-                    ShowMenuAndStatusBar = false;
-                }
+                // Entering fullscreen hides the menu bar + status bar so the active
+                // library view fills the screen (immersive console experience).
+                // Previously this only happened while a game was running, leaving
+                // the menu/toolbar/status visible over the library in fullscreen.
+                ShowMenuAndStatusBar = false;
 
                 if (OperatingSystem.IsWindows())
                 {
@@ -2608,6 +2609,7 @@ namespace Ryujinx.Ava.UI.ViewModels
             }
 
             IsFullScreen = WindowState is WindowState.FullScreen;
+            NotifyLibraryPresentation();
         }
 
         private nint _savedWindowStyle;

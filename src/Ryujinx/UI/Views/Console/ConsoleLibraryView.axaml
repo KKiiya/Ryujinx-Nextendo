@@ -93,14 +93,12 @@
             <Border Background="{DynamicResource ConsoleDimOverlay}" IsHitTestVisible="False" />
         </Panel>
         <!-- Top bar: view toggle, section tabs, clock. -->
-        <!-- Top bar: view toggle, section tabs, clock. Hidden in fullscreen so the
-             game view itself fills the screen (immersive console experience). -->
+        <!-- Top bar: view toggle, section tabs, clock. -->
         <Grid
             Name="TopBar"
             Grid.Row="0"
             Margin="16,10,16,0"
-            ColumnDefinitions="Auto,*,Auto"
-            IsVisible="{Binding !IsFullScreen}">
+            ColumnDefinitions="Auto,*,Auto">
             <StackPanel
                 Grid.Column="0"
                 HorizontalAlignment="Left"
@@ -297,20 +295,18 @@
                     Foreground="{DynamicResource ConsoleTextSecondary}" />
             </StackPanel>
         </Grid>
-        <!-- Selected game details. Hidden in fullscreen with the rest of the chrome. -->
+        <!-- Selected game details -->
         <console:GameDetailsPanel
             Grid.Row="2"
             Margin="0,4,0,6"
-            HorizontalAlignment="Center"
-            IsVisible="{Binding !IsFullScreen}" />
+            HorizontalAlignment="Center" />
         <!-- Bottom bar: settings, hints, options, rescan. -->
-        <!-- Bottom bar: settings, hints, options, rescan. Hidden in fullscreen. -->
+        <!-- Bottom bar: settings, hints, options, rescan. -->
         <Grid
             Name="BottomBar"
             Grid.Row="3"
             Margin="16,0,16,14"
-            ColumnDefinitions="Auto,*,Auto"
-            IsVisible="{Binding !IsFullScreen}">
+            ColumnDefinitions="Auto,*,Auto">
             <Button
                 Grid.Column="0"
                 Name="SettingsCornerButton"

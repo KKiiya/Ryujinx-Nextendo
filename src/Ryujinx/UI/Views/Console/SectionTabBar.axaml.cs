@@ -1,5 +1,6 @@
 using Avalonia;
 using Avalonia.Controls;
+using Avalonia.Threading;
 using Avalonia.Interactivity;
 using Avalonia.Media;
 using Ryujinx.Ava.UI.Controls;
@@ -24,6 +25,19 @@ namespace Ryujinx.Ava.UI.Views.Console
             Attach();
         }
 
+        protected override void OnDetachedFromVisualTree(VisualTreeAttachmentEventArgs e)
+        {
+            base.OnDetachedFromVisualTree(e);
+
+            RyujinxApp.ThemeChanged -= OnAppThemeChanged;
+
+            if (_attachedVm?.ConsoleLibrary != null)
+            {
+                _attachedVm.ConsoleLibrary.PropertyChanged -= OnConsolePropertyChanged;
+                _attachedVm = null;
+            }
+        }
+
         private MainWindowViewModel _attachedVm;
 
         private void Attach()
@@ -43,7 +57,19 @@ namespace Ryujinx.Ava.UI.Views.Console
                 }
             }
 
+            // The selected-tab colors are assigned as static brushes (see StyleTab),
+            // so a live theme switch would leave stale colors behind: re-apply them.
+            RyujinxApp.ThemeChanged -= OnAppThemeChanged;
+            RyujinxApp.ThemeChanged += OnAppThemeChanged;
+
             RefreshTabHighlights();
+        }
+
+        private void OnAppThemeChanged()
+        {
+            // ThemeChanged fires before RequestedThemeVariant is updated, so resolve
+            // the brushes on the next dispatcher pump, once the new theme applies.
+            Dispatcher.UIThread.Post(RefreshTabHighlights);
         }
 
         private void OnConsolePropertyChanged(object sender, System.ComponentModel.PropertyChangedEventArgs e)

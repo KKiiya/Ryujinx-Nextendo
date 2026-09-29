@@ -29,6 +29,13 @@ namespace Ryujinx.Ava.UI.ViewModels
         public bool IsGridActive => IsClassicView && IsGrid;
         public bool IsCarouselActive => IsClassicView && IsCarousel;
 
+        /// <summary>
+        /// Classic toolbar (view buttons, size slider, search, sort). Hidden in
+        /// fullscreen along with the menu/status bar so the library view fills
+        /// the screen.
+        /// </summary>
+        public bool IsClassicToolbarVisible => IsClassicView && !IsFullScreen;
+
         public bool ConsoleReduceAnimations
         {
             get => ConfigurationState.Instance.UI.ConsoleReduceAnimations.Value;
@@ -62,6 +69,7 @@ namespace Ryujinx.Ava.UI.ViewModels
             OnPropertyChanged(nameof(IsListActive));
             OnPropertyChanged(nameof(IsGridActive));
             OnPropertyChanged(nameof(IsCarouselActive));
+            OnPropertyChanged(nameof(IsClassicToolbarVisible));
         }
 
         public void ToggleLibraryPresentation()
