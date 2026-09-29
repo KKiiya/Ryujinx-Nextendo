@@ -12,6 +12,8 @@
         Padding="4"
         HorizontalAlignment="Center"
         Background="{DynamicResource ConsolePillBackground}"
+        BorderBrush="{DynamicResource ConsoleCardBorder}"
+        BorderThickness="1"
         CornerRadius="{DynamicResource ConsolePillRadius}">
         <StackPanel Orientation="Horizontal" Spacing="4">
             <Button

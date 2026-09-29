@@ -51,8 +51,8 @@
             <Setter Property="RenderTransform" Value="scale(1.07)" />
         </Style>
         <Style Selector="Button.consoleCornerButton">
-            <Setter Property="Background" Value="#33000000" />
-            <Setter Property="BorderBrush" Value="#3A3A3A" />
+            <Setter Property="Background" Value="{DynamicResource ConsoleCornerBackground}" />
+            <Setter Property="BorderBrush" Value="{DynamicResource ConsoleCornerBorder}" />
             <Setter Property="BorderThickness" Value="1" />
             <Setter Property="CornerRadius" Value="24" />
             <Setter Property="Padding" Value="0" />
@@ -66,8 +66,8 @@
         <Panel Grid.RowSpan="4">
             <Panel.Background>
                 <LinearGradientBrush StartPoint="0,0" EndPoint="0,1">
-                    <GradientStop Offset="0" Color="#1B1B22" />
-                    <GradientStop Offset="1" Color="#0B0B0E" />
+                    <GradientStop Offset="0" Color="{DynamicResource ConsoleBackgroundFallbackTopColor}" />
+                    <GradientStop Offset="1" Color="{DynamicResource ConsoleBackgroundFallbackBottomColor}" />
                 </LinearGradientBrush>
             </Panel.Background>
             <Image
@@ -97,8 +97,43 @@
             Grid.Row="0"
             Margin="16,10,16,0"
             ColumnDefinitions="Auto,*,Auto">
-            <Button
+            <StackPanel
                 Grid.Column="0"
+                HorizontalAlignment="Left"
+                VerticalAlignment="Center"
+                Orientation="Horizontal"
+                Spacing="10">
+            <Button
+                Name="ProfileAvatarButton"
+                Classes="consoleCornerButton"
+                Width="48"
+                Height="48"
+                Padding="0"
+                Click="ProfileAvatarButton_OnClick">
+                <Border
+                    Width="44"
+                    Height="44"
+                    ClipToBounds="True"
+                    CornerRadius="22"
+                    Background="{DynamicResource ConsoleCardBackground}">
+                    <Grid>
+                        <Image
+                            Name="ConsoleProfileAvatarImage"
+                            Width="44"
+                            Height="44"
+                            Stretch="UniformToFill"
+                            IsVisible="False" />
+                        <i:Icon
+                            Name="ConsoleProfileAvatarFallback"
+                            Value="fa-solid fa-user"
+                            FontSize="20"
+                            HorizontalAlignment="Center"
+                            VerticalAlignment="Center"
+                            Foreground="{DynamicResource ConsoleTextSecondary}" />
+                    </Grid>
+                </Border>
+            </Button>
+            <Button
                 Classes="consoleCornerButton"
                 Width="48"
                 Height="48"
@@ -108,6 +143,7 @@
                 ToolTip.Tip="{ext:Locale Console_ClassicView}">
                 <i:Icon Value="fa-solid fa-list" FontSize="20" />
             </Button>
+            </StackPanel>
             <console:SectionTabBar
                 Name="TabBar"
                 Grid.Column="1"
@@ -313,7 +349,7 @@
             VerticalAlignment="Center"
             MinWidth="320"
             Padding="20"
-            Background="#F2141418"
+            Background="{DynamicResource ConsoleOverlayBackground}"
             BorderBrush="{DynamicResource ConsoleCardBorder}"
             BorderThickness="1"
             CornerRadius="16"

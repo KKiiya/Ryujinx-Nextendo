@@ -2,10 +2,62 @@
     xmlns="https://github.com/avaloniaui"
     xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml">
     <!-- Central palette for the Console (HOME-style) library view.
-         The Classic List/Grid views keep using the theme resources. -->
+         The Classic List/Grid views keep using the theme resources.
+         Dark values follow the existing launcher look; Light values follow the
+         Nintendo Switch HOME light theme from the reference: light-gray page,
+         white cards/buttons, near-black text, Joy-Con neon-blue (#0AB9E6)
+         selection accents. The app sets RequestedThemeVariant globally, so the
+         Light/Dark dictionaries below swap automatically. -->
+    <ResourceDictionary.ThemeDictionaries>
+        <ResourceDictionary x:Key="Light">
+            <SolidColorBrush x:Key="ConsoleBackground">#FFF2F2F2</SolidColorBrush>
+            <SolidColorBrush x:Key="ConsoleBackgroundFallbackTop">#FFF4F4F4</SolidColorBrush>
+            <Color x:Key="ConsoleBackgroundFallbackTopColor">#FFF4F4F4</Color>
+            <SolidColorBrush x:Key="ConsoleBackgroundFallbackBottom">#FFE1E1E1</SolidColorBrush>
+            <Color x:Key="ConsoleBackgroundFallbackBottomColor">#FFE1E1E1</Color>
+            <SolidColorBrush x:Key="ConsoleCardBackground">#FFFFFFFF</SolidColorBrush>
+            <SolidColorBrush x:Key="ConsolePillBackground">#FFFFFFFF</SolidColorBrush>
+            <SolidColorBrush x:Key="ConsolePillSelectedBackground">#FF0AB9E6</SolidColorBrush>
+            <SolidColorBrush x:Key="ConsoleAccent">#FF0AB9E6</SolidColorBrush>
+            <SolidColorBrush x:Key="ConsoleTextPrimary">#FF2B2B2B</SolidColorBrush>
+            <SolidColorBrush x:Key="ConsoleTextSecondary">#FF6E6E6E</SolidColorBrush>
+            <SolidColorBrush x:Key="ConsoleTextOnAccent">#FF0B0D12</SolidColorBrush>
+            <SolidColorBrush x:Key="ConsoleFocusRing">#FF0AB9E6</SolidColorBrush>
+            <SolidColorBrush x:Key="ConsoleDimOverlay">#CCFFFFFF</SolidColorBrush>
+            <SolidColorBrush x:Key="ConsoleCardBorder">#FFD5D5D5</SolidColorBrush>
+            <SolidColorBrush x:Key="ConsoleHintKeyBackground">#FFDFDFDF</SolidColorBrush>
+            <SolidColorBrush x:Key="ConsoleOverlayBackground">#F7FFFFFF</SolidColorBrush>
+            <SolidColorBrush x:Key="ConsoleCornerBackground">#FFFFFFFF</SolidColorBrush>
+            <SolidColorBrush x:Key="ConsoleCornerBorder">#FFD5D5D5</SolidColorBrush>
+        </ResourceDictionary>
+        <ResourceDictionary x:Key="Dark">
+            <SolidColorBrush x:Key="ConsoleBackground">#FF101014</SolidColorBrush>
+            <SolidColorBrush x:Key="ConsoleBackgroundFallbackTop">#FF1B1B22</SolidColorBrush>
+            <Color x:Key="ConsoleBackgroundFallbackTopColor">#FF1B1B22</Color>
+            <SolidColorBrush x:Key="ConsoleBackgroundFallbackBottom">#FF0B0B0E</SolidColorBrush>
+            <Color x:Key="ConsoleBackgroundFallbackBottomColor">#FF0B0B0E</Color>
+            <SolidColorBrush x:Key="ConsoleCardBackground">#FF1E1E26</SolidColorBrush>
+            <SolidColorBrush x:Key="ConsolePillBackground">#CC23232C</SolidColorBrush>
+            <SolidColorBrush x:Key="ConsolePillSelectedBackground">#FF3EE8C8</SolidColorBrush>
+            <SolidColorBrush x:Key="ConsoleAccent">#FF3EE8C8</SolidColorBrush>
+            <SolidColorBrush x:Key="ConsoleTextPrimary">#FFFFFFFF</SolidColorBrush>
+            <SolidColorBrush x:Key="ConsoleTextSecondary">#FFB4B4BC</SolidColorBrush>
+            <SolidColorBrush x:Key="ConsoleTextOnAccent">#FF0B0D12</SolidColorBrush>
+            <SolidColorBrush x:Key="ConsoleFocusRing">#FFFFFFFF</SolidColorBrush>
+            <SolidColorBrush x:Key="ConsoleDimOverlay">#99101213</SolidColorBrush>
+            <SolidColorBrush x:Key="ConsoleCardBorder">#FF3A3A44</SolidColorBrush>
+            <SolidColorBrush x:Key="ConsoleHintKeyBackground">#FF2A2A33</SolidColorBrush>
+            <SolidColorBrush x:Key="ConsoleOverlayBackground">#F2141418</SolidColorBrush>
+            <SolidColorBrush x:Key="ConsoleCornerBackground">#33000000</SolidColorBrush>
+            <SolidColorBrush x:Key="ConsoleCornerBorder">#FF3A3A3A</SolidColorBrush>
+        </ResourceDictionary>
+    </ResourceDictionary.ThemeDictionaries>
+    <!-- Default (fallback) values: same as Dark. -->
     <SolidColorBrush x:Key="ConsoleBackground">#FF101014</SolidColorBrush>
     <SolidColorBrush x:Key="ConsoleBackgroundFallbackTop">#FF1B1B22</SolidColorBrush>
+            <Color x:Key="ConsoleBackgroundFallbackTopColor">#FF1B1B22</Color>
     <SolidColorBrush x:Key="ConsoleBackgroundFallbackBottom">#FF0B0B0E</SolidColorBrush>
+            <Color x:Key="ConsoleBackgroundFallbackBottomColor">#FF0B0B0E</Color>
     <SolidColorBrush x:Key="ConsoleCardBackground">#FF1E1E26</SolidColorBrush>
     <SolidColorBrush x:Key="ConsolePillBackground">#CC23232C</SolidColorBrush>
     <SolidColorBrush x:Key="ConsolePillSelectedBackground">#FF3EE8C8</SolidColorBrush>
@@ -17,6 +69,9 @@
     <SolidColorBrush x:Key="ConsoleDimOverlay">#99101213</SolidColorBrush>
     <SolidColorBrush x:Key="ConsoleCardBorder">#FF3A3A44</SolidColorBrush>
     <SolidColorBrush x:Key="ConsoleHintKeyBackground">#FF2A2A33</SolidColorBrush>
+    <SolidColorBrush x:Key="ConsoleOverlayBackground">#F2141418</SolidColorBrush>
+    <SolidColorBrush x:Key="ConsoleCornerBackground">#33000000</SolidColorBrush>
+    <SolidColorBrush x:Key="ConsoleCornerBorder">#FF3A3A3A</SolidColorBrush>
     <CornerRadius x:Key="ConsoleCardRadius">12</CornerRadius>
     <CornerRadius x:Key="ConsolePillRadius">18</CornerRadius>
 </ResourceDictionary>
