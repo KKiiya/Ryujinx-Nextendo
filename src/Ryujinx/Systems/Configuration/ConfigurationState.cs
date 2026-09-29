@@ -153,12 +153,15 @@ namespace Ryujinx.Ava.Systems.Configuration
                 MultiplayerDisableP2p = Multiplayer.DisableP2p,
                 MultiplayerLdnPassphrase = Multiplayer.LdnPassphrase,
                 LdnServer = Multiplayer.LdnServer,
+                MultiplayerLanPlayServer = Multiplayer.LanPlayServer,
+                MultiplayerLanPlayVirtualIp = Multiplayer.LanPlayVirtualIp,
                 EnableGdbStub = Debug.EnableGdbStub,
                 GdbStubPort = Debug.GdbStubPort,
                 DebuggerSuspendOnStart = Debug.DebuggerSuspendOnStart,
                 ShowDirtyHacks = Hacks.ShowDirtyHacks,
                 DirtyHacks = Hacks.EnabledHacks.Select(it => it.Pack()).ToArray(),
                 PauseEmulationWhileScanningAmiibo = UI.PauseEmulationWhileScanningAmiibo,
+                WallpaperPath = UI.WallpaperPath,
             };
 
             return configurationFile;
@@ -176,12 +179,12 @@ namespace Ryujinx.Ava.Systems.Configuration
             Graphics.PreferredGpu.Value = string.Empty;
             Graphics.ShadersDumpPath.Value = string.Empty;
             Logger.EnableDebug.Value = false;
-            Logger.EnableStub.Value = true;
+            Logger.EnableStub.Value = false;
             Logger.EnableInfo.Value = true;
             Logger.EnableWarn.Value = true;
             Logger.EnableError.Value = true;
             Logger.EnableTrace.Value = false;
-            Logger.EnableGuest.Value = true;
+            Logger.EnableGuest.Value = false;
             Logger.EnableFsAccessLog.Value = false;
             Logger.EnableNetLog.Value = false;
             Logger.EnableAvaloniaLog.Value = false;
@@ -219,7 +222,18 @@ namespace Ryujinx.Ava.Systems.Configuration
             System.AudioVolume.Value = 1;
             System.MemoryManagerMode.Value = MemoryManagerMode.HostMappedUnsafe;
             System.DramSize.Value = MemoryConfiguration.MemoryConfiguration4GiB;
-            System.IgnoreMissingServices.Value = false;
+            // [Nextendo] Deux reglages actives d'office, parce que le jeu en ligne les exige et
+            // qu'un joueur n'a aucune raison d'aller les chercher dans les parametres.
+            //
+            // MatchSystemTime : l'horloge de la console suit celle de la machine. Sans elle, elle
+            // derive, et un festival dont les phases changent a des heures precises place le joueur
+            // dans la mauvaise phase — il voit l'annonce quand les autres jouent, ou l'inverse.
+            //
+            // IgnoreMissingServices : quand le jeu reclame un service que l'emulateur n'implemente
+            // pas, il continue au lieu d'abandonner. Laisse a false, il s'arrete sur des services
+            // que l'en-ligne appelle et dont l'absence n'a pourtant aucune consequence.
+            System.MatchSystemTime.Value = true;
+            System.IgnoreMissingServices.Value = true;
             System.IgnoreControllerApplet.Value = false;
             System.SkipUserProfilesManager.Value = false;
             // [Nextendo beta] Hypervisor is macOS-only (Hypervisor.framework). Defaulting it to true
@@ -231,6 +245,8 @@ namespace Ryujinx.Ava.Systems.Configuration
             Multiplayer.DisableP2p.Value = false;
             Multiplayer.LdnPassphrase.Value = string.Empty;
             Multiplayer.LdnServer.Value = string.Empty;
+            Multiplayer.LanPlayServer.Value = string.Empty;
+            Multiplayer.LanPlayVirtualIp.Value = string.Empty;
             UI.GuiColumns.FavColumn.Value = true;
             UI.GuiColumns.IconColumn.Value = true;
             UI.GuiColumns.AppColumn.Value = true;
@@ -267,6 +283,7 @@ namespace Ryujinx.Ava.Systems.Configuration
             UI.WindowStartup.WindowPositionY.Value = 0;
             UI.WindowStartup.WindowMaximized.Value = false;
             UI.PauseEmulationWhileScanningAmiibo.Value = true;
+            UI.WallpaperPath.Value = string.Empty;
             Hid.EnableKeyboard.Value = false;
             Hid.EnableMouse.Value = false;
             Hid.DisableInputWhenOutOfFocus.Value = false;

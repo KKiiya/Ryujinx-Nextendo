@@ -52,6 +52,8 @@ namespace Ryujinx.HLE.HOS.Services.Account.Acc.AccountService
 
         private byte[] _cachedTokenData;
         private DateTime _cachedTokenExpiry;
+        private string _cachedTokenVersion;
+        private ulong _cachedTokenProgramId;
 
         public ManagerServer(UserId userId)
         {
@@ -100,7 +102,7 @@ namespace Ryujinx.HLE.HOS.Services.Account.Acc.AccountService
             return rsa;
         }
 
-        private static string GenerateIdToken()
+        private static string GenerateIdToken(string installedVersion, ulong programId)
         {
             RSAParameters parameters = _nextendoIdTokenRsa.ExportParameters(true);
 
@@ -119,6 +121,44 @@ namespace Ryujinx.HLE.HOS.Services.Account.Acc.AccountService
             byte[] deviceAccountId = new byte[0x10];
             RandomNumberGenerator.Fill(deviceAccountId);
 
+            Dictionary<string, object> claims = new()
+            {
+                { "jku", "https://e0d67c509fb203858ebcb2fe3f88c2aa.baas.nintendo.com/1.0.0/certificates" },
+                { "jti", Guid.NewGuid().ToString() },
+                { "di", Convert.ToHexString(deviceId).ToLower() },
+                { "sn", "XAW10000000000" },
+                { "bs:did", Convert.ToHexString(deviceAccountId).ToLower() },
+                // NSO membership flag — Splatoon 2 reads this LOCALLY to gate online entry.
+                { "hm", true },
+            };
+
+            // Scarlet shares Violet's NPLN tenant but needs its own app_id.
+            // Violet and every other game's BAAS token remain byte-compatible
+            // with the existing claim shape.
+            if (programId == 0x0100A3D008C5C000)
+            {
+                claims["app_id"] = programId.ToString("X16");
+            }
+
+            // [Nextendo] Cryptographic account binding for the NEX login. The game forwards
+            // this id_token inside its NEX login extraData, but the auth server can't trust
+            // the bare account PID the game ALSO sends as its login username — a custom build
+            // could send anyone's (sequential PIDs => trivial impersonation). So we ride the
+            // signed nx2 token (an HMAC over "pid.username.expiry" keyed by a secret only the
+            // server holds) along in a custom "nnex" claim. The auth server validates that
+            // HMAC and rejects any PID the token doesn't prove. Present only when a Nextendo
+            // account is linked (online); absent otherwise, so offline is completely unaffected.
+            string nexToken = NextendoAccount.NexToken;
+            if (!string.IsNullOrEmpty(nexToken))
+            {
+                claims["nnex"] = nexToken;
+            }
+
+            if (!string.IsNullOrEmpty(installedVersion))
+            {
+                claims["tv"] = installedVersion;
+            }
+
             SecurityTokenDescriptor descriptor = new()
             {
                 Subject = new ClaimsIdentity([new Claim(JwtRegisteredClaimNames.Sub, Convert.ToHexString(rawUserId).ToLower())]),
@@ -128,16 +168,7 @@ namespace Ryujinx.HLE.HOS.Services.Account.Acc.AccountService
                 TokenType = "id_token",
                 IssuedAt = DateTime.UtcNow,
                 Expires = DateTime.UtcNow + TimeSpan.FromHours(3),
-                Claims = new Dictionary<string, object>
-                {
-                    { "jku", "https://e0d67c509fb203858ebcb2fe3f88c2aa.baas.nintendo.com/1.0.0/certificates" },
-                    { "jti", Guid.NewGuid().ToString() },
-                    { "di", Convert.ToHexString(deviceId).ToLower() },
-                    { "sn", "XAW10000000000" },
-                    { "bs:did", Convert.ToHexString(deviceAccountId).ToLower() },
-                    // NSO membership flag — Splatoon 2 reads this LOCALLY to gate online entry.
-                    { "hm", true },
-                }
+                Claims = claims,
             };
 
             return new JsonWebTokenHandler().CreateToken(descriptor);
@@ -218,10 +249,16 @@ namespace Ryujinx.HLE.HOS.Services.Account.Acc.AccountService
             }
             */
 
-            if (_cachedTokenData == null || DateTime.UtcNow > _cachedTokenExpiry)
+            string installedVersion = context.Device.Processes.ActiveApplication?.DisplayVersion;
+            ulong programId = context.Device.Processes.ActiveApplication?.ProgramId ?? 0;
+
+            if (_cachedTokenData == null || DateTime.UtcNow > _cachedTokenExpiry ||
+                installedVersion != _cachedTokenVersion || programId != _cachedTokenProgramId)
             {
                 _cachedTokenExpiry = DateTime.UtcNow + TimeSpan.FromHours(3);
-                _cachedTokenData = Encoding.ASCII.GetBytes(GenerateIdToken());
+                _cachedTokenVersion = installedVersion;
+                _cachedTokenProgramId = programId;
+                _cachedTokenData = Encoding.ASCII.GetBytes(GenerateIdToken(installedVersion, programId));
             }
 
             byte[] tokenData = _cachedTokenData;

@@ -5,6 +5,7 @@ using System.IO;
 using Ryujinx.Common.Logging;
 using System;
 using System.Collections.Generic;
+using System.Globalization;
 using System.Net;
 using System.Net.Http;
 using System.Net.Sockets;
@@ -143,13 +144,96 @@ namespace Ryujinx.Ava.Common
 
         private static HttpClient Client()
         {
+            // [Nextendo] Seconde barrière, volontairement redondante avec NextendoAccount :
+            // en mode « serveur personnalisé » aucune requête ne doit partir vers nos
+            // services, même celles qui ne regardent pas si un compte est lié (les compteurs
+            // publics, par exemple). Le jeton, lui, est déjà tu à la source ; ceci ferme le
+            // reste — l'existence même du trafic.
+            if (NextendoServerOverride.HorsNextendo)
+            {
+                throw new NextendoDesactiveException();
+            }
+
             HttpClient http = new() { Timeout = TimeSpan.FromSeconds(15) };
             if (!string.IsNullOrEmpty(NextendoAccount.NexToken))
             {
                 http.DefaultRequestHeaders.Add("Authorization", "Bearer " + NextendoAccount.NexToken);
             }
+            // [Nextendo] Preuve d'application (client_id enregistré), distincte du jeton joueur
+            // ci-dessus : voir NextendoAppSecrets pour pourquoi les deux ne peuvent pas partager
+            // un en-tête. Nom d'en-tête à garder synchronisé avec apiGuard côté serveur.
+            if (!string.IsNullOrEmpty(NextendoAppSecrets.AppToken))
+            {
+                http.DefaultRequestHeaders.Add("X-Nextendo-Client-Id", NextendoAppSecrets.AppToken);
+            }
 
             return http;
+        }
+
+        /// <summary>
+        /// [Nextendo] For the handful of calls that build their own short-lived HttpClient
+        /// instead of going through Client() above (pre-login endpoints: guest creation,
+        /// nickname check, beta config) - same client_id header, no player token possible yet
+        /// since none of these calls happen after a login.
+        /// </summary>
+        public static void AddAppHeader(HttpClient http)
+        {
+            if (!string.IsNullOrEmpty(NextendoAppSecrets.AppToken))
+            {
+                http.DefaultRequestHeaders.Add("X-Nextendo-Client-Id", NextendoAppSecrets.AppToken);
+            }
+        }
+
+        /// <summary>
+        /// Levée quand on tente de joindre Nextendo alors que le mode « serveur personnalisé »
+        /// est actif. Tous les appels de cette classe sont déjà enveloppés dans un try/catch
+        /// qui journalise et rend une valeur vide : l'appelant obtient donc « rien », ce qui
+        /// est exactement l'état attendu hors Nextendo.
+        /// </summary>
+        public sealed class NextendoDesactiveException : Exception
+        {
+            public NextendoDesactiveException()
+                : base("Nextendo Network est desactive : mode serveur personnalise actif.")
+            {
+            }
+        }
+
+        // [Nextendo] Granular online-refusal state, mirroring the account server's /api/online-status.
+        // Restored here because the scrubbed public source dropped this member: AvaHostUIHandler needs
+        // it to explain WHY online is refused (unverified e-mail, unlinked Discord, playing elsewhere,
+        // operator-disabled) instead of always blaming a server outage.
+        public enum OnlineRefusalState
+        {
+            NotBlocked,
+            Blocked,
+            Unreachable,
+        }
+
+        // Asks the account server whether one of the online gates is refusing THIS account. Returns
+        // (state, reason) with reason in { "", "unverified", "discord_unlinked", "elsewhere",
+        // "disabled", "unknown" }. Any transport error -> Unreachable (caller shows the generic
+        // "servers unreachable" message rather than inventing a refusal).
+        public static async Task<(OnlineRefusalState state, string reason)> GetOnlineRefusalAsync()
+        {
+            try
+            {
+                using HttpClient http = Client();
+                HttpResponseMessage resp = await http.GetAsync($"{BaseUrl()}/api/online-status");
+                if (!resp.IsSuccessStatusCode)
+                {
+                    return (OnlineRefusalState.Unreachable, "");
+                }
+
+                using JsonDocument doc = JsonDocument.Parse(await resp.Content.ReadAsStringAsync());
+                JsonElement r = doc.RootElement;
+                bool allow = r.TryGetProperty("allow", out JsonElement a) && a.ValueKind == JsonValueKind.True;
+                string reason = r.TryGetProperty("reason", out JsonElement rs) ? (rs.GetString() ?? "") : "";
+                return allow ? (OnlineRefusalState.NotBlocked, reason) : (OnlineRefusalState.Blocked, reason);
+            }
+            catch
+            {
+                return (OnlineRefusalState.Unreachable, "");
+            }
         }
 
         /// <summary>
@@ -386,6 +470,7 @@ namespace Ryujinx.Ava.Common
             try
             {
                 using HttpClient http = new() { Timeout = TimeSpan.FromSeconds(15) };
+                AddAppHeader(http);
                 string payload = $"{{\"username\":{JsonSerializer.Serialize(nickname)}}}";
                 using StringContent body = new(payload, Encoding.UTF8, "application/json");
                 HttpResponseMessage resp = await http.PostAsync($"{BaseUrl()}/api/guest", body);
@@ -435,6 +520,7 @@ namespace Ryujinx.Ava.Common
             try
             {
                 using HttpClient http = new() { Timeout = TimeSpan.FromSeconds(8) };
+                AddAppHeader(http);
                 HttpResponseMessage resp = await http.GetAsync($"{BaseUrl()}/api/username-available?username={Uri.EscapeDataString(nickname)}");
                 if (!resp.IsSuccessStatusCode)
                 {
@@ -459,6 +545,7 @@ namespace Ryujinx.Ava.Common
             try
             {
                 using HttpClient http = new() { Timeout = TimeSpan.FromSeconds(8) };
+                AddAppHeader(http);
                 HttpResponseMessage resp = await http.GetAsync($"{BaseUrl()}/api/beta-config?channel={ReleaseChannel}");
                 if (!resp.IsSuccessStatusCode)
                 {
@@ -634,6 +721,384 @@ namespace Ryujinx.Ava.Common
             }
         }
 
+        /// <summary>A friend's offer to join their game session; expires after 5 minutes server-side.</summary>
+        public sealed class GameInvitation
+        {
+            public string Id = "";
+            public ulong SenderPid;
+            public string SenderName = "";
+            public ulong TitleId;
+            public byte[] UserData = [];
+            public long ExpiresAt; // Unix seconds
+
+            public bool IsExpired => ExpiresAt != 0 && ExpiresAt <= DateTimeOffset.UtcNow.ToUnixTimeSeconds();
+        }
+
+        // The server accepts 1-15 recipients, at most 1 KiB of session data and a 3 KiB description.
+        public static async Task<(bool ok, string message)> SendGameInvitationAsync(ulong titleId, IReadOnlyList<ulong> recipients, byte[] userData, byte[] description)
+        {
+            try
+            {
+                using HttpClient http = Client();
+                string payload = $"{{\"action\":\"send\",\"title_id\":\"{titleId:X16}\",\"recipients\":[{string.Join(",", recipients)}]," +
+                                 $"\"user_data\":\"{Convert.ToBase64String(userData)}\",\"description\":\"{Convert.ToBase64String(description)}\"}}";
+                using StringContent body = new(payload, Encoding.UTF8, "application/json");
+                HttpResponseMessage resp = await http.PostAsync($"{BaseUrl()}/api/game-invitations", body);
+
+                return resp.IsSuccessStatusCode ? (true, "") : (false, await ReadErrorMessage(resp));
+            }
+            catch (Exception ex)
+            {
+                return (false, ex.Message);
+            }
+        }
+
+        // Null when the inbox couldn't be read, so callers keep what they already show.
+        public static async Task<List<GameInvitation>> GetGameInvitationsAsync()
+        {
+            try
+            {
+                using HttpClient http = Client();
+                HttpResponseMessage resp = await http.GetAsync($"{BaseUrl()}/api/game-invitations");
+                HealIfRejected(resp);
+                if (!resp.IsSuccessStatusCode)
+                {
+                    return null;
+                }
+
+                using JsonDocument doc = JsonDocument.Parse(await resp.Content.ReadAsStringAsync());
+                List<GameInvitation> invitations = [];
+                foreach (JsonElement i in doc.RootElement.GetProperty("invitations").EnumerateArray())
+                {
+                    invitations.Add(new GameInvitation
+                    {
+                        Id = i.GetProperty("id").GetString() ?? "",
+                        SenderPid = i.GetProperty("sender_pid").GetUInt64(),
+                        SenderName = i.GetProperty("sender_name").GetString() ?? "",
+                        TitleId = ulong.Parse(i.GetProperty("title_id").GetString() ?? "0", NumberStyles.HexNumber, CultureInfo.InvariantCulture),
+                        UserData = i.TryGetProperty("user_data", out JsonElement data) && data.ValueKind == JsonValueKind.String
+                            ? Convert.FromBase64String(data.GetString())
+                            : [],
+                        ExpiresAt = i.TryGetProperty("expires_at", out JsonElement expires) ? expires.GetInt64() : 0,
+                    });
+                }
+
+                return invitations;
+            }
+            catch (Exception ex)
+            {
+                Logger.Warning?.Print(LogClass.Application, $"[Nextendo] GetGameInvitations failed: {ex.Message}");
+                return null;
+            }
+        }
+
+        public static async Task DismissGameInvitationAsync(string id)
+        {
+            try
+            {
+                using HttpClient http = Client();
+                using StringContent body = new($"{{\"action\":\"dismiss\",\"id\":{JsonSerializer.Serialize(id)}}}", Encoding.UTF8, "application/json");
+                await http.PostAsync($"{BaseUrl()}/api/game-invitations", body);
+            }
+            catch (Exception ex)
+            {
+                Logger.Warning?.Print(LogClass.Application, $"[Nextendo] DismissGameInvitation failed: {ex.Message}");
+            }
+        }
+
+        // -------------------------------------------------------------------
+        // [Nextendo] Mon salon en direct, mes dernières rencontres, et le
+        // signalement d'un joueur.
+        //
+        // Ces trois appels partagent un principe : le serveur ne renvoie JAMAIS
+        // d'adresse IP. Elle existe côté serveur de jeu, mais dans un tableau
+        // que l'endpoint ne lit pas — c'est délibéré, et c'est ce qui permet de
+        // montrer un salon à un joueur sans exposer où habitent les autres.
+        //
+        // Les avatars arrivent en URL et non en base64 inline comme pour les
+        // amis : à 8 joueurs rafraîchis toutes les 5 s, le base64 pèserait des
+        // centaines de kilo-octets par sondage, et 2 Mo pour 50 rencontres.
+        // On télécharge donc à part, une seule fois par PID (voir le cache).
+
+        /// <summary>Un joueur tel qu'il apparaît dans un salon ou dans l'historique des rencontres.</summary>
+        public sealed class NextendoPlayer
+        {
+            public ulong Pid;
+            public string Name = "";
+
+            /// <summary>False quand le PID ne correspond à aucun compte Nextendo connu :
+            /// on ne peut alors ni l'ajouter en ami, ni le signaler utilement.</summary>
+            public bool Known;
+
+            public string AvatarUrl = "";
+
+            /// <summary>Code ami, envoye par le serveur pour que le bouton d ajout
+            /// rapide reutilise /api/friends, qui prend un code et non un PID.</summary>
+            public string FriendCode = "";
+
+            /// <summary>Hôte du salon. Vide de sens dans la liste des rencontres.</summary>
+            public bool Host;
+
+            /// <summary>C'est moi. Sert à ne pas m'afficher un bouton « signaler » sur moi-même.</summary>
+            public bool IsMe;
+
+            /// <summary>Title id du jeu où la rencontre a eu lieu.</summary>
+            public string TitleId = "";
+
+            /// <summary>Date de la rencontre, en heure locale. DateTime.MinValue si inconnue.</summary>
+            public DateTime SeenAt = DateTime.MinValue;
+        }
+
+        /// <summary>L'état du salon courant.</summary>
+        public sealed class NextendoLobby
+        {
+            public bool InLobby;
+            public string TitleId = "";
+            public string Type = "";
+
+            /// <summary>Libellé brut publié par le serveur de jeu. Écrit pour le
+            /// monitoring, donc EN FRANÇAIS : ne jamais l'afficher tel quel dans
+            /// l'émulateur, qui suit la langue du joueur. Voir <see cref="StateCode"/>.</summary>
+            public string State = "";
+
+            /// <summary>Code stable dérivé de <see cref="State"/> par le serveur de
+            /// comptes : « searching », « matched », ou vide si le serveur de jeu a
+            /// publié un état qu'il ne sait pas classer. C'est CE champ qu'on traduit.</summary>
+            public string StateCode = "";
+
+            /// <summary>Identifiant du salon côté serveur de jeu. Sert d'identifiant de
+            /// groupe pour Discord : deux joueurs du même salon doivent porter le même,
+            /// sinon Discord affiche deux groupes là où il n'y en a qu'un.</summary>
+            public ulong Id;
+
+            public int Count;
+            public int Max;
+            public List<NextendoPlayer> Players = [];
+        }
+
+        /// <summary>Le salon où je me trouve MAINTENANT, et qui y est avec moi.</summary>
+        public static async Task<NextendoLobby> GetMyLobbyAsync()
+        {
+            NextendoLobby lobby = new();
+            try
+            {
+                using HttpClient http = Client();
+                HttpResponseMessage resp = await http.GetAsync($"{BaseUrl()}/api/my-lobby");
+                HealIfRejected(resp);
+                using JsonDocument doc = JsonDocument.Parse(await resp.Content.ReadAsStringAsync());
+                JsonElement root = doc.RootElement;
+
+                lobby.InLobby = root.TryGetProperty("in_lobby", out JsonElement il) && il.ValueKind == JsonValueKind.True;
+                if (!lobby.InLobby)
+                {
+                    return lobby;
+                }
+
+                lobby.TitleId = root.TryGetProperty("title_id", out JsonElement ti) ? (ti.GetString() ?? "") : "";
+                if (root.TryGetProperty("lobby", out JsonElement l) && l.ValueKind == JsonValueKind.Object)
+                {
+                    lobby.Type = l.TryGetProperty("type", out JsonElement ty) ? (ty.GetString() ?? "") : "";
+                    lobby.State = l.TryGetProperty("state", out JsonElement st) ? (st.GetString() ?? "") : "";
+                    lobby.StateCode = l.TryGetProperty("state_code", out JsonElement sc) ? (sc.GetString() ?? "") : "";
+                    lobby.Id = l.TryGetProperty("id", out JsonElement lid) && lid.TryGetUInt64(out ulong idv) ? idv : 0;
+                    lobby.Count = l.TryGetProperty("count", out JsonElement c) ? c.GetInt32() : 0;
+                    lobby.Max = l.TryGetProperty("max", out JsonElement mx) ? mx.GetInt32() : 0;
+                }
+                if (root.TryGetProperty("players", out JsonElement pa) && pa.ValueKind == JsonValueKind.Array)
+                {
+                    foreach (JsonElement p in pa.EnumerateArray())
+                    {
+                        lobby.Players.Add(ParseNextendoPlayer(p));
+                    }
+                }
+            }
+            catch (Exception ex)
+            {
+                Logger.Warning?.Print(LogClass.Application, $"[Nextendo] GetMyLobby failed: {ex.Message}");
+            }
+
+            return lobby;
+        }
+
+        /// <summary>Les 50 dernières personnes croisées en ligne, la plus récente d'abord.</summary>
+        public static async Task<List<NextendoPlayer>> GetRecentPlayersAsync()
+        {
+            List<NextendoPlayer> players = [];
+            try
+            {
+                using HttpClient http = Client();
+                HttpResponseMessage resp = await http.GetAsync($"{BaseUrl()}/api/recent-players");
+                HealIfRejected(resp);
+                using JsonDocument doc = JsonDocument.Parse(await resp.Content.ReadAsStringAsync());
+                if (doc.RootElement.TryGetProperty("players", out JsonElement pa) && pa.ValueKind == JsonValueKind.Array)
+                {
+                    foreach (JsonElement p in pa.EnumerateArray())
+                    {
+                        players.Add(ParseNextendoPlayer(p));
+                    }
+                }
+            }
+            catch (Exception ex)
+            {
+                Logger.Warning?.Print(LogClass.Application, $"[Nextendo] GetRecentPlayers failed: {ex.Message}");
+            }
+
+            return players;
+        }
+
+        /// <summary>Signale un joueur. Le serveur refuse si on ne l'a jamais croisé.</summary>
+        public static async Task<(bool ok, string message)> ReportPlayerAsync(ulong pid, string reason, string comment)
+        {
+            try
+            {
+                using HttpClient http = Client();
+                string payload = JsonSerializer.Serialize(new
+                {
+                    target_pid = pid,
+                    reason = reason ?? "",
+                    comment = comment ?? "",
+                });
+                using StringContent body = new(payload, Encoding.UTF8, "application/json");
+                HttpResponseMessage resp = await http.PostAsync($"{BaseUrl()}/api/report-player", body);
+                HealIfRejected(resp);
+
+                if (resp.IsSuccessStatusCode)
+                {
+                    return (true, "");
+                }
+
+                // Le serveur distingue ses refus, et le joueur mérite de savoir
+                // lequel : « déjà 10 signalements cette heure » n'appelle pas la
+                // même réaction que « vous n'avez pas croisé ce joueur ».
+                string erreur = "";
+                try
+                {
+                    using JsonDocument doc = JsonDocument.Parse(await resp.Content.ReadAsStringAsync());
+                    if (doc.RootElement.TryGetProperty("error", out JsonElement e))
+                    {
+                        erreur = e.GetString() ?? "";
+                    }
+                }
+                catch (Exception)
+                {
+                    // Corps illisible : on retombe sur le code HTTP seul.
+                }
+
+                return (false, erreur);
+            }
+            catch (Exception ex)
+            {
+                Logger.Warning?.Print(LogClass.Application, $"[Nextendo] ReportPlayer failed: {ex.Message}");
+
+                return (false, "network");
+            }
+        }
+
+        // Cache d'avatars. Une photo de profil change rarement et sert à chaque
+        // rafraîchissement du salon : la retélécharger toutes les 5 secondes
+        // pour huit joueurs serait absurde. Borné pour ne pas croître sans fin
+        // au fil des rencontres.
+        private static readonly Dictionary<ulong, byte[]> _avatarCache = [];
+        private const int AvatarCacheMax = 200;
+
+        /// <summary>
+        /// Client dédié aux avatars, SANS en-tête d'autorisation.
+        ///
+        /// ⚠️ /api/avatar est public et sans authentification : joindre le jeton du compte
+        /// n'apporte rien et l'expose. Une version antérieure passait par Client(), qui pose le
+        /// Bearer, sur une URL ABSOLUE venue de la réponse du serveur — c'est-à-dire qu'un champ
+        /// JSON décidait où partait le jeton. C'est exactement le trou que NextendoEndpoint avait
+        /// été écrit pour fermer sur la variable NEXTENDO_API.
+        /// </summary>
+        private static readonly HttpClient _avatarHttp = CreateAvatarHttp();
+
+        /// <summary>
+        /// Toujours sans jeton joueur (voir la note ci-dessus), mais porte quand même le
+        /// client_id : ce n'est pas un secret, juste l'identité de l'application, et sans lui
+        /// apiGuard refuse la requête au même titre que n'importe quel appel non enregistré.
+        /// </summary>
+        private static HttpClient CreateAvatarHttp()
+        {
+            HttpClient c = new() { Timeout = TimeSpan.FromSeconds(10) };
+            if (!string.IsNullOrEmpty(NextendoAppSecrets.AppToken))
+            {
+                c.DefaultRequestHeaders.Add("X-Nextendo-Client-Id", NextendoAppSecrets.AppToken);
+            }
+            return c;
+        }
+
+        /// <summary>Télécharge (et mémorise) la photo de profil d'un joueur. Null si indisponible.</summary>
+        public static async Task<byte[]> GetAvatarAsync(ulong pid, string url)
+        {
+            if (pid == 0)
+            {
+                return null;
+            }
+
+            lock (_avatarCache)
+            {
+                if (_avatarCache.TryGetValue(pid, out byte[] cached))
+                {
+                    return cached;
+                }
+            }
+
+            try
+            {
+                // L'URL est RECONSTRUITE ici, jamais reprise du serveur : le paramètre `url` ne
+                // sert plus qu'à savoir si ce compte a une photo. Laisser une réponse choisir
+                // l'hôte d'une requête sortante, c'est laisser un champ JSON faire visiter le
+                // réseau local de la machine du joueur.
+                if (string.IsNullOrEmpty(url))
+                {
+                    return null;
+                }
+
+                byte[] data = await _avatarHttp.GetByteArrayAsync(
+                    $"{BaseUrl()}/api/avatar?pid={pid}");
+
+                lock (_avatarCache)
+                {
+                    if (_avatarCache.Count >= AvatarCacheMax)
+                    {
+                        _avatarCache.Clear();
+                    }
+                    _avatarCache[pid] = data;
+                }
+
+                return data;
+            }
+            catch (Exception)
+            {
+                // Pas d'avatar : l'écran affiche l'initiale du pseudo. Ce n'est
+                // pas une erreur digne d'un log à chaque rafraîchissement.
+                return null;
+            }
+        }
+
+        private static NextendoPlayer ParseNextendoPlayer(JsonElement p)
+        {
+            NextendoPlayer player = new()
+            {
+                Pid = p.TryGetProperty("pid", out JsonElement id) ? id.GetUInt64() : 0,
+                Name = p.TryGetProperty("name", out JsonElement n) ? (n.GetString() ?? "") : "",
+                Known = p.TryGetProperty("known", out JsonElement k) && k.ValueKind == JsonValueKind.True,
+                AvatarUrl = p.TryGetProperty("avatar_url", out JsonElement a) ? (a.GetString() ?? "") : "",
+                FriendCode = p.TryGetProperty("friend_code", out JsonElement fc) ? (fc.GetString() ?? "") : "",
+                Host = p.TryGetProperty("host", out JsonElement h) && h.ValueKind == JsonValueKind.True,
+                IsMe = p.TryGetProperty("is_me", out JsonElement m) && m.ValueKind == JsonValueKind.True,
+                TitleId = p.TryGetProperty("title_id", out JsonElement t) ? (t.GetString() ?? "") : "",
+            };
+
+            if (p.TryGetProperty("seen_at", out JsonElement s)
+                && DateTime.TryParse(s.GetString(), CultureInfo.InvariantCulture, DateTimeStyles.RoundtripKind, out DateTime vu))
+            {
+                player.SeenAt = vu.ToLocalTime();
+            }
+
+            return player;
+        }
+
         // -------------------------------------------------------------------
         // [Nextendo] "Sign in with Nextendo" — OAuth 2.0 Authorization Code + PKCE with a loopback
         // redirect (RFC 8252), the standard secure flow for a native desktop app (same idea as
@@ -650,22 +1115,29 @@ namespace Ryujinx.Ava.Common
             string state = RandUrl(24);
 
             // Loopback listener on a free port, 127.0.0.1 only (loopback needs no admin/URL ACL).
-            int port = FreeLoopbackPort();
-            string redirectUri = $"http://127.0.0.1:{port}/callback";
-            HttpListener listener = new();
-            listener.Prefixes.Add($"http://127.0.0.1:{port}/");
+            // A RAW TcpListener, NOT HttpListener: on Linux/macOS HttpListener is a fragile managed
+            // shim (only Windows gets the http.sys kernel driver), and its loopback callback never
+            // fired for Linux users — the browser authorised, but this listener was never hit, so the
+            // account never linked. Reading the single GET request line off a raw socket behaves
+            // identically on every OS.
+            TcpListener listener;
+            int port;
             try
             {
+                listener = new TcpListener(IPAddress.Loopback, 0);
                 listener.Start();
+                port = ((IPEndPoint)listener.LocalEndpoint).Port;
             }
             catch (Exception ex)
             {
                 return (false, $"Impossible d'ouvrir un port local : {ex.Message}");
             }
 
+            string redirectUri = $"http://127.0.0.1:{port}/callback";
+            string clientId = string.IsNullOrEmpty(NextendoAppSecrets.AppToken) ? "unregistered" : NextendoAppSecrets.AppToken;
             string authorizeUrl =
-                $"{BaseUrl()}/api/oauth/authorize?response_type=code&client_id=nextendo-emulator" +
-                $"&redirect_uri={Uri.EscapeDataString(redirectUri)}&scope=identity+friends" +
+                $"{BaseUrl()}/api/oauth/authorize?response_type=code&client_id={Uri.EscapeDataString(clientId)}" +
+                $"&redirect_uri={Uri.EscapeDataString(redirectUri)}&scope=identity+friends+sauvegardes+history+presence&app=ryujinx" +
                 $"&state={state}&code_challenge={challenge}&code_challenge_method=S256";
 
             try
@@ -674,35 +1146,49 @@ namespace Ryujinx.Ava.Common
             }
             catch (Exception ex)
             {
-                listener.Close();
+                listener.Stop();
                 return (false, $"Impossible d'ouvrir le navigateur : {ex.Message}");
             }
 
+            Logger.Info?.Print(LogClass.Application,
+                $"[Nextendo] OAuth: browser opened, waiting for loopback callback on 127.0.0.1:{port}");
+
             // Wait for the browser to hit the loopback callback (max 5 minutes).
-            HttpListenerContext ctx;
+            string code, gotState, oauthError;
             try
             {
-                Task<HttpListenerContext> pending = listener.GetContextAsync();
-                if (await Task.WhenAny(pending, Task.Delay(TimeSpan.FromMinutes(5))) != pending)
-                {
-                    listener.Close();
-                    return (false, "Délai de connexion dépassé.");
-                }
-                ctx = await pending;
+                using System.Threading.CancellationTokenSource timeout = new(TimeSpan.FromMinutes(5));
+                using Socket socket = await listener.AcceptSocketAsync(timeout.Token);
+                using NetworkStream stream = new(socket, ownsSocket: false);
+
+                string requestTarget = await ReadRequestTargetAsync(stream, timeout.Token);
+                Uri callback = new("http://127.0.0.1" +
+                    (requestTarget.StartsWith('/') ? requestTarget : "/" + requestTarget));
+                Dictionary<string, string> query = ParseQuery(callback.Query);
+                query.TryGetValue("code", out code);
+                query.TryGetValue("state", out gotState);
+                query.TryGetValue("error", out oauthError);
+
+                bool good = string.IsNullOrEmpty(oauthError) && !string.IsNullOrEmpty(code) && gotState == state;
+                Logger.Info?.Print(LogClass.Application,
+                    $"[Nextendo] OAuth: loopback callback received (code={(string.IsNullOrEmpty(code) ? "none" : "yes")}, state_ok={gotState == state}, error={oauthError ?? "none"})");
+
+                await WriteLoopbackResponseAsync(stream, good);
+            }
+            catch (OperationCanceledException)
+            {
+                Logger.Warning?.Print(LogClass.Application,
+                    "[Nextendo] OAuth: no loopback callback within 5 min — the browser never reached 127.0.0.1 (sandboxed browser / firewall?)");
+                return (false, "Délai de connexion dépassé.");
             }
             catch (Exception ex)
             {
-                listener.Close();
                 return (false, ex.Message);
             }
-
-            string code = ctx.Request.QueryString["code"];
-            string gotState = ctx.Request.QueryString["state"];
-            string oauthError = ctx.Request.QueryString["error"];
-            bool good = string.IsNullOrEmpty(oauthError) && !string.IsNullOrEmpty(code) && gotState == state;
-
-            await WriteLoopbackPageAsync(ctx, good);
-            listener.Close();
+            finally
+            {
+                listener.Stop();
+            }
 
             if (!string.IsNullOrEmpty(oauthError))
             {
@@ -725,7 +1211,7 @@ namespace Ryujinx.Ava.Common
                 {
                     ["grant_type"] = "authorization_code",
                     ["code"] = code,
-                    ["client_id"] = "nextendo-emulator",
+                    ["client_id"] = clientId,
                     ["redirect_uri"] = redirectUri,
                     ["code_verifier"] = verifier,
                 });
@@ -756,28 +1242,68 @@ namespace Ryujinx.Ava.Common
             }
         }
 
-        private static async Task WriteLoopbackPageAsync(HttpListenerContext ctx, bool ok)
+        // Read just the HTTP request line's target from the loopback callback, i.e. the
+        // "/callback?code=...&state=..." in "GET /callback?... HTTP/1.1". We only need the first line;
+        // the browser sends it immediately, so a single read of a few KB always contains it.
+        private static async Task<string> ReadRequestTargetAsync(NetworkStream stream, System.Threading.CancellationToken ct)
+        {
+            byte[] buf = new byte[8192];
+            int total = 0;
+            while (total < buf.Length)
+            {
+                int n = await stream.ReadAsync(buf.AsMemory(total, buf.Length - total), ct);
+                if (n <= 0)
+                {
+                    break;
+                }
+
+                total += n;
+                if (Array.IndexOf(buf, (byte)'\n', 0, total) >= 0)
+                {
+                    break; // reached the end of the request line
+                }
+            }
+
+            string firstLine = Encoding.ASCII.GetString(buf, 0, total).Split('\n', 2)[0].TrimEnd('\r');
+            string[] parts = firstLine.Split(' ');
+            return parts.Length >= 2 ? parts[1] : "/";
+        }
+
+        private static Dictionary<string, string> ParseQuery(string query)
+        {
+            Dictionary<string, string> result = new(StringComparer.Ordinal);
+            foreach (string pair in query.TrimStart('?').Split('&', StringSplitOptions.RemoveEmptyEntries))
+            {
+                int eq = pair.IndexOf('=');
+                string key = eq < 0 ? pair : pair[..eq];
+                string value = eq < 0 ? "" : pair[(eq + 1)..];
+                result[Uri.UnescapeDataString(key)] = Uri.UnescapeDataString(value);
+            }
+
+            return result;
+        }
+
+        private static async Task WriteLoopbackResponseAsync(NetworkStream stream, bool ok)
         {
             string inner = ok
                 ? "<h1 style='color:#33E86B'>✓ Connexion réussie</h1><p>Tu peux fermer cet onglet et retourner à l'émulateur Nextendo.</p>"
                 : "<h1 style='color:#ff8a8a'>Connexion annulée</h1><p>Retourne à l'émulateur Nextendo et réessaie.</p>";
-            byte[] buf = Encoding.UTF8.GetBytes(
+            byte[] body = Encoding.UTF8.GetBytes(
                 "<!doctype html><meta charset=utf-8><title>Nextendo</title>" +
                 "<body style='font-family:system-ui,sans-serif;background:#0f1115;color:#e7e9ee;display:grid;place-items:center;height:100vh;margin:0'>" +
                 "<div style='text-align:center;max-width:420px'>" + inner + "</div>");
-            ctx.Response.ContentType = "text/html; charset=utf-8";
-            ctx.Response.ContentLength64 = buf.Length;
-            try { await ctx.Response.OutputStream.WriteAsync(buf); } catch { /* browser may have closed */ }
-            try { ctx.Response.OutputStream.Close(); } catch { }
-        }
-
-        private static int FreeLoopbackPort()
-        {
-            TcpListener l = new(IPAddress.Loopback, 0);
-            l.Start();
-            int port = ((IPEndPoint)l.LocalEndpoint).Port;
-            l.Stop();
-            return port;
+            byte[] header = Encoding.ASCII.GetBytes(
+                "HTTP/1.1 200 OK\r\n" +
+                "Content-Type: text/html; charset=utf-8\r\n" +
+                $"Content-Length: {body.Length}\r\n" +
+                "Connection: close\r\n\r\n");
+            try
+            {
+                await stream.WriteAsync(header);
+                await stream.WriteAsync(body);
+                await stream.FlushAsync();
+            }
+            catch { /* browser may have closed */ }
         }
 
         private static string RandUrl(int nbytes) => Base64Url(RandomNumberGenerator.GetBytes(nbytes));

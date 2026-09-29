@@ -18,6 +18,16 @@
     </MSBuild>
   </Target>
 
+  <Target Name="EnsureNextendoAppSecrets" BeforeTargets="BeforeBuild" Condition="!Exists('$(MSBuildProjectDirectory)\Common\NextendoAppSecrets.cs')">
+    <Copy SourceFiles="$(MSBuildProjectDirectory)\Common\NextendoAppSecrets.template.cs" DestinationFiles="$(MSBuildProjectDirectory)\Common\NextendoAppSecrets.cs" />
+  </Target>
+
+  <ItemGroup>
+    <Compile Remove="Common\NextendoAppSecrets.template.cs" />
+    <Compile Remove="Common\NextendoAppSecrets.cs" />
+    <Compile Include="Common\NextendoAppSecrets.cs" />
+  </ItemGroup>
+
   <Target Name="PostBuild" AfterTargets="PostBuildEvent" Condition="$([MSBuild]::IsOSPlatform('OSX'))">
     <Exec Command="codesign --entitlements '$(ProjectDir)..\..\distribution\macos\entitlements.xml' -f -s $(SigningCertificate) '$(TargetDir)$(TargetName)'" />
   </Target>
@@ -27,6 +37,19 @@
     <TrimmerSingleWarn>false</TrimmerSingleWarn>
     <PublishTrimmed>true</PublishTrimmed>
     <TrimMode>partial</TrimMode>
+
+    <!--
+      [Nextendo] Le trimmer REEMET les assemblages qu'il retaille (HarfBuzzSharp, SkiaSharp...) en
+      recopiant dans leur repertoire de debogage le chemin du .pdb de l'obj qui les a produits. Ce
+      chemin est celui de la machine de build, en clair dans le binaire publie : jusqu'a la 1.7.6,
+      chaque release Windows et Linux portait le nom d'utilisateur et l'arborescence de travail de
+      celui qui l'avait compilee. Rien n'exploite cela, mais rien ne justifie non plus de le livrer.
+      Ce reglage supprime ces repertoires de debogage a la reemission.
+
+      Restent deux chemins que nous ne produisons pas : ceux de Gommon et d'OpenTK, deja presents
+      dans les paquets NuGet tels que leurs auteurs les publient.
+    -->
+    <TrimmerRemoveSymbols>true</TrimmerRemoveSymbols>
   </PropertyGroup>
   
   <!--
@@ -174,6 +197,9 @@
     <EmbeddedResource Include="Assets\UIImages\Logo_Discord_Light.png" />
     <EmbeddedResource Include="Assets\UIImages\Logo_Ryujinx.png" />
     <EmbeddedResource Include="Assets\UIImages\Logo_Forgejo.png" />
+    <EmbeddedResource Include="Assets\UIImages\Logo_Nextendo.png" />
+    <EmbeddedResource Include="Assets\UIImages\Logo_Discord_Nextendo.png" />
+    <EmbeddedResource Include="Assets\UIImages\Logo_Web_Nextendo.png" />
     <EmbeddedResource Include="Assets\UIImages\Logo_Ryujinx_AntiAlias.png" />
     <EmbeddedResource Include="Assets\PlayReports\*.json" />
     <EmbeddedResource Include="Assets\Splashes.json" />

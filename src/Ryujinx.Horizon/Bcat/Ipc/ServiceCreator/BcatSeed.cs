@@ -1,17 +1,37 @@
+using Ryujinx.Common.Configuration;
 using System;
 using System.Runtime.InteropServices;
 using System.Text;
 
 namespace Ryujinx.Horizon.Bcat.Ipc
 {
-    // Serves BCAT delivery-cache content from a plain host folder next to the emulator:
-    //   <exe dir>/bcat-seed/<directoryName>/<fileName>
+    // Serves BCAT delivery-cache content from a plain host folder:
+    //   <bcat-seed root>/<directoryName>/<fileName>
     // This lets us inject the schedule data (e.g. Splatoon 2 vsdata/VSSetting_0.byaml) that a
     // live BCAT server would normally deliver, which Ryujinx never populates. Used as a fallback
     // by DeliveryCacheDirectoryService / DeliveryCacheFileService when the real (empty) cache misses.
     internal static class BcatSeed
     {
-        public static string Root => System.IO.Path.Combine(AppContext.BaseDirectory, "bcat-seed");
+        // The seed lives ONLY in the WRITABLE app-data dir (portable/bcat-seed). It MUST be writable:
+        // on macOS the .app bundle (AppContext.BaseDirectory) is read-only, so the download that
+        // populates it failed there; same under Program Files on Windows.
+        //
+        // [Nextendo] The legacy next-to-exe fallback was REMOVED: shipping a static seed there let a
+        // STALE copy be served whenever the writable one was absent, and users copied that stale
+        // folder to other emulators (wrong Splatoon 2 rotation). The on-launch sync (NextendoByamlSync)
+        // keeps this single writable location current from the server, so it is the only source read.
+        public static string Root => System.IO.Path.Combine(AppDataManager.BaseDirPath, "bcat-seed");
+
+        public static string RootForTitle(ulong titleId) => titleId switch
+        {
+            0x01008F6008C5E000 => System.IO.Path.Combine(Root, "01008f6008c5e000"),
+            0x0100A3D008C5C000 => System.IO.Path.Combine(Root, "0100a3d008c5c000"),
+            _ => Root,
+        };
+
+        public static bool IsPokemonTitleRoot(string name) =>
+            name.Equals("01008f6008c5e000", StringComparison.OrdinalIgnoreCase) ||
+            name.Equals("0100a3d008c5c000", StringComparison.OrdinalIgnoreCase);
 
         public static string DirPath(string dir) => System.IO.Path.Combine(Root, dir);
 

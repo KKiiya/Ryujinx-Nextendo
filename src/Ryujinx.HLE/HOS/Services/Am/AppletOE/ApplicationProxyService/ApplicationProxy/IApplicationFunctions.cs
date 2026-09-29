@@ -50,7 +50,7 @@ namespace Ryujinx.HLE.HOS.Services.Am.AppletOE.ApplicationProxyService.Applicati
         {
             // TODO: Find where they are signaled.
             _gpuErrorDetectedSystemEvent = new KEvent(system.KernelContext);
-            _friendInvitationStorageChannelEvent = new KEvent(system.KernelContext);
+            _friendInvitationStorageChannelEvent = system.AppletState.FriendInvitationEvent;
             _notificationStorageChannelEvent = new KEvent(system.KernelContext);
             _healthWarningDisappearedSystemEvent = new KEvent(system.KernelContext);
             _unknownEvent = new KEvent(system.KernelContext);
@@ -126,6 +126,24 @@ namespace Ryujinx.HLE.HOS.Services.Am.AppletOE.ApplicationProxyService.Applicati
 
             LibHac.HorizonClient hos = context.Device.System.LibHacHorizonManager.AmClient;
             LibHac.Result result = hos.Fs.EnsureApplicationSaveData(out long requiredSize, applicationId, in nacp, in userId);
+
+            // [Nextendo] Provisionner AUSSI le cache de livraison BCAT du jeu, ce que l'emulateur ne
+            // faisait pas.
+            //
+            // Une console cree ce stockage au premier lancement d'un titre qui declare en avoir besoin
+            // (champ BcatDeliveryCacheStorageSize du NACP). Ryujinx ne creait que la sauvegarde
+            // utilisateur, si bien que le cache n'existait pour aucun jeu. Les titres qui empruntent le
+            // chemin BCAT moderne s'y cassaient : Splatoon 3 demande son cache au demarrage, LibHac
+            // refuse d'ouvrir un stockage jamais provisionne (2002-6400, PermissionDenied), le jeu
+            // reessaie toutes les demi-secondes puis affiche l'erreur. Splatoon 2, qui passe par la
+            // commande heritee, ne rencontrait pas ce mur — d'ou des annees sans que ca se voie.
+            if (nacp.BcatDeliveryCacheStorageSize > 0)
+            {
+                LibHac.Result bcatResult = hos.Fs.EnsureApplicationBcatDeliveryCacheStorage(out long bcatSize, applicationId, in nacp);
+
+                Logger.Info?.Print(LogClass.ServiceAm,
+                    $"[Nextendo] cache de livraison BCAT du titre {applicationId.Value:X16} : {(bcatResult.IsSuccess() ? "pret" : $"echec 0x{bcatResult.Value:X}")} ({bcatSize} octets demandes)");
+            }
 
             context.ResponseData.Write(requiredSize);
 
@@ -615,12 +633,15 @@ namespace Ryujinx.HLE.HOS.Services.Am.AppletOE.ApplicationProxyService.Applicati
         // TryPopFromFriendInvitationStorageChannel() -> object<nn::am::service::IStorage>
         public ResultCode TryPopFromFriendInvitationStorageChannel(ServiceCtx context)
         {
-            // NOTE: IStorage are pushed in the channel with IApplicationAccessor PushToFriendInvitationStorageChannel
-            //       If _friendInvitationStorageChannelEvent is signaled, the event is cleared.
-            //       If an IStorage is available, returns it with ResultCode.Success.
-            //       If not, just returns ResultCode.NotAvailable. Since we don't support friend feature for now, it's fine to do the same.
+            // Filled by Horizon.PushFriendInvitation when the user accepts a Nextendo game invitation.
+            if (context.Device.System.AppletState.FriendInvitations.TryDequeue(out byte[] storage))
+            {
+                MakeObject(context, new AppletAE.IStorage(storage));
 
-            Logger.Stub?.PrintStub(LogClass.ServiceAm);
+                return ResultCode.Success;
+            }
+
+            _friendInvitationStorageChannelEvent.ReadableEvent.Clear();
 
             return ResultCode.NotAvailable;
         }

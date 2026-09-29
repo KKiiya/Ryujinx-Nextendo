@@ -37,6 +37,131 @@ namespace Ryujinx.HLE.HOS
         private const string CheatExtension = ".txt";
         private const string DefaultCheatName = "<default>";
 
+        // ⚠️ SPLATOON 3 — AUCUN MOD, QUELLE QU'EN SOIT LA FORME.
+        //
+        // Le test ouvert de Splatoon 3 se joue sur les serveurs Nextendo, contre de vrais adversaires.
+        // Un seul mod de jeu — portée d'une arme, cadence de tir, vitesse de déplacement, un simple
+        // fichier de paramètres remplacé par LayeredFS — suffit à gâcher la partie de sept autres
+        // joueurs. Et le serveur ne peut rien y voir : c'est la console qui calcule les tirs et les
+        // touches, puis rapporte le résultat. Nous n'avons aucun moyen de contredire un client modifié.
+        //
+        // On coupe donc à la RACINE, plutôt que de tenter de distinguer un mod « de triche » d'un mod
+        // cosmétique — une distinction que rien ne permet de faire de façon fiable, un mod purement
+        // visuel pouvant toujours cacher une valeur de jeu. Pour ce titre, et pour lui seul, le
+        // chargeur de mods ne collecte rien et n'applique rien.
+        //
+        // Cinq portes à fermer, pas une : romfs (dossier), romfs.bin (conteneur), exefs, les
+        // correctifs IPS/pchtxt — y compris les correctifs GLOBAUX, qui ne passent pas par le cache
+        // par application — et les codes de triche, dont l'activation lit son fichier directement.
+        public const ulong Splatoon3ApplicationId = 0x0100C2500FC20000;
+
+        /// <summary>Vrai si ce titre refuse tout mod (Splatoon 3 : test en ligne sans triche).</summary>
+        /// <summary>
+        /// L'interdiction ne vaut que sur NOS serveurs : elle existe parce que Splatoon 3 s'y
+        /// joue contre de vraies personnes et qu'un seul mod de jeu gâcherait leur partie. En
+        /// mode « serveur personnalisé », l'émulateur ne parle plus à Nextendo du tout, et la
+        /// politique d'un serveur privé n'est pas la nôtre à faire respecter.
+        /// </summary>
+        /// ⚠️ La condition est <see cref="NextendoServerOverride.IsActive"/>, PAS
+        /// <c>HorsNextendo</c>. HorsNextendo est vrai dès que la case est cochée, même sans
+        /// adresse valide — et dans ce cas la redirection retombe sur nos serveurs. Se fier à
+        /// HorsNextendo laissait donc jouer moddé SUR NOS SERVEURS PUBLICS, en éditant à la main
+        /// un fichier JSON pour cocher la case sans rien remplir. IsActive exige une adresse
+        /// utilisable, donc un trafic qui part réellement ailleurs.
+        public static bool ModsInterdits(ulong applicationId) =>
+            applicationId == Splatoon3ApplicationId && !NextendoServerOverride.IsActive;
+
+        /// <summary>
+        /// Noms des mods trouves sur le disque pour un titre qui les refuse, et donc IGNORES.
+        ///
+        /// On les releve au lieu de les ignorer en silence : un joueur qui a installe un mod et ne
+        /// le voit pas agir croira a un bug de l'emulateur, pas a une regle. L'interface lit cette
+        /// liste au lancement pour le lui dire clairement.
+        /// </summary>
+        public static IReadOnlyList<string> ModsRefuses => _modsRefuses;
+        private static readonly List<string> _modsRefuses = [];
+
+        /// <summary>
+        /// Recense les mods installes pour un titre, SANS rien charger.
+        ///
+        /// Sert a prevenir le joueur AVANT le lancement : la collecte, elle, n'a lieu qu'au
+        /// chargement du programme, trop tard pour afficher un message utile.
+        /// </summary>
+        /// <remarks>
+        /// Rend le CHEMIN COMPLET du dossier, pas son nom.
+        ///
+        /// Un mod peut etre pose de deux facons : dans son propre dossier
+        /// (contents/&lt;titre&gt;/MonMod/exefs) ou a plat, directement a la racine du titre
+        /// (contents/&lt;titre&gt;/exefs). Dans le second cas le nom vaut « exefs » ou « romfs » —
+        /// c'est un type de contenu, pas un nom de mod, et le message affichait donc « exefs »
+        /// tout court. Un joueur qui ne se souvient pas d'avoir installe quoi que ce soit y lit
+        /// une accusation incomprehensible, et n'a aucun moyen de retrouver le dossier fautif.
+        /// Le chemin, lui, se lit et s'ouvre.
+        /// </remarks>
+        public static List<string> ModsInstallesPour(ulong applicationId)
+        {
+            List<string> trouves = [];
+
+            foreach (string racine in new[] { GetModsBasePath(), GetSdModsBasePath() })
+            {
+                DirectoryInfo contenus = new(Path.Combine(racine, AmsContentsDir));
+                if (!contenus.Exists)
+                {
+                    continue;
+                }
+
+                DirectoryInfo dossierDuJeu = FindApplicationDir(contenus, $"{applicationId:x16}");
+                if (dossierDuJeu == null || !dossierDuJeu.Exists)
+                {
+                    continue;
+                }
+
+                foreach (DirectoryInfo mod in dossierDuJeu.EnumerateDirectories())
+                {
+                    if (mod.EnumerateFileSystemInfos().Any() && !trouves.Contains(mod.FullName))
+                    {
+                        trouves.Add(mod.FullName);
+                    }
+                }
+            }
+
+            return trouves;
+        }
+
+        /// <summary>Recense ce qui est installe pour un titre qui refuse les mods.</summary>
+        private static void RecenserModsRefuses(ulong applicationId, ReadOnlySpan<string> searchDirPaths)
+        {
+            foreach (string racine in searchDirPaths)
+            {
+                DirectoryInfo contenus = new(Path.Combine(racine, AmsContentsDir));
+                if (!contenus.Exists)
+                {
+                    continue;
+                }
+
+                DirectoryInfo dossierDuJeu = FindApplicationDir(contenus, $"{applicationId:x16}");
+                if (dossierDuJeu == null || !dossierDuJeu.Exists)
+                {
+                    continue;
+                }
+
+                foreach (DirectoryInfo mod in dossierDuJeu.EnumerateDirectories())
+                {
+                    // Un dossier de mod vide n'est pas un mod : ne pas alarmer pour rien.
+                    if (mod.EnumerateFileSystemInfos().Any() && !_modsRefuses.Contains(mod.Name))
+                    {
+                        _modsRefuses.Add(mod.Name);
+                    }
+                }
+            }
+
+            if (_modsRefuses.Count > 0)
+            {
+                Logger.Warning?.Print(LogClass.ModLoader,
+                    $"[Nextendo] Application {applicationId:X16} : {_modsRefuses.Count} mod(s) IGNORE(S) — {string.Join(", ", _modsRefuses)}");
+            }
+        }
+
         private const string AmsContentsDir = "contents";
         private const string AmsNsoPatchDir = "exefs_patches";
         private const string AmsNroPatchDir = "nro_patches";
@@ -137,6 +262,7 @@ namespace Ryujinx.HLE.HOS
         {
             _appMods.Clear();
             _patches = new PatchCache();
+            _modsRefuses.Clear();
         }
 
         private static bool StrEquals(string s1, string s2) => string.Equals(s1, s2, StringComparison.OrdinalIgnoreCase);
@@ -469,14 +595,34 @@ namespace Ryujinx.HLE.HOS
 
             foreach (ulong applicationId in applications)
             {
+                if (ModsInterdits(applicationId))
+                {
+                    Logger.Info?.Print(LogClass.ModLoader, $"Application {applicationId:X16} : mods desactives (test en ligne Nextendo) — rien ne sera collecte");
+                    RecenserModsRefuses(applicationId, searchDirPaths);
+
+                    continue;
+                }
+
                 _appMods[applicationId] = new ModCache();
             }
 
             CollectMods(_appMods, _patches, searchDirPaths);
+
+            // Ceinture ET bretelles : si un chemin de collecte venait a creer l'entree malgre tout,
+            // on la retire. Le cout est nul, et l'oubli couterait une partie truquee.
+            foreach (ulong applicationId in _appMods.Keys.Where(ModsInterdits).ToList())
+            {
+                _appMods.Remove(applicationId);
+            }
         }
 
         internal IStorage ApplyRomFsMods(ulong applicationId, IStorage baseStorage)
         {
+            if (ModsInterdits(applicationId))
+            {
+                return baseStorage;
+            }
+
             if (!_appMods.TryGetValue(applicationId, out ModCache mods) || mods.RomfsDirs.Count + mods.RomfsContainers.Count == 0)
             {
                 return baseStorage;
@@ -611,6 +757,11 @@ namespace Ryujinx.HLE.HOS
 
             string tempHash = string.Empty;
 
+            if (ModsInterdits(applicationId))
+            {
+                return modLoadResult;
+            }
+
             if (!_appMods.TryGetValue(applicationId, out ModCache mods) || mods.ExefsDirs.Count == 0)
             {
                 return modLoadResult;
@@ -706,6 +857,21 @@ namespace Ryujinx.HLE.HOS
 
         internal bool ApplyNsoPatches(ulong applicationId, params ReadOnlySpan<IExecutable> programs)
         {
+            // ⚠️ Sortir AVANT _patches.NsoPatches : ces correctifs-la sont GLOBAUX (mods/exefs_patches
+            // et sdcard/atmosphere/exefs_patches), ils ne passent pas par le cache par application.
+            // Sans cette garde, un simple .pchtxt depose la s'appliquerait a Splatoon 3 malgre tout.
+            //
+            // Mais Splatoon 3 a BESOIN de deux correctifs pour parler a nos serveurs (contournement
+            // du certificat epingle, nom de pair). Ils ne viennent plus du disque : ils sont integres
+            // au binaire (NextendoS3Patches). Le disque est donc refuse en bloc, sans exception a
+            // percer — et le joueur n'a aucun fichier a installer.
+            if (ModsInterdits(applicationId))
+            {
+                return AppliquerCorrectifsIntegres(programs);
+            }
+
+            bool correctifsIntegresAppliques = AppliquerCorrectifsIntegres(programs);
+
             IEnumerable<Mod<DirectoryInfo>> nsoMods = _patches.NsoPatches;
 
             if (_appMods.TryGetValue(applicationId, out ModCache mods))
@@ -715,11 +881,18 @@ namespace Ryujinx.HLE.HOS
 
             // NSO patches are created with offset 0 according to Atmosphere's patcher module
             // But `Program` doesn't contain the header which is 0x100 bytes. So, we adjust for that here
-            return ApplyProgramPatches(nsoMods, 0x100, programs);
+            return ApplyProgramPatches(nsoMods, 0x100, programs) || correctifsIntegresAppliques;
         }
 
         internal void LoadCheats(ulong applicationId, ProcessTamperInfo tamperInfo, TamperMachine tamperMachine)
         {
+            if (ModsInterdits(applicationId))
+            {
+                Logger.Info?.Print(LogClass.ModLoader, $"Application {applicationId:X16} : codes de triche desactives (test en ligne Nextendo)");
+
+                return;
+            }
+
             if (tamperInfo?.BuildIds == null || tamperInfo.CodeAddresses == null)
             {
                 Logger.Error?.Print(LogClass.ModLoader, "Unable to install cheat because the associated process is invalid");
@@ -759,6 +932,13 @@ namespace Ryujinx.HLE.HOS
 
         internal static void EnableCheats(ulong applicationId, TamperMachine tamperMachine)
         {
+            // Cette methode lit enabled.txt SUR LE DISQUE, sans passer par le cache des mods : elle
+            // doit donc porter sa propre garde, sinon elle rouvre seule la porte qu'on vient de fermer.
+            if (ModsInterdits(applicationId))
+            {
+                return;
+            }
+
             DirectoryInfo contentDirectory = FindApplicationDir(new DirectoryInfo(Path.Combine(GetModsBasePath(), AmsContentsDir)), $"{applicationId:x16}");
             string enabledCheatsPath = Path.Combine(contentDirectory.FullName, CheatDir, "enabled.txt");
 
@@ -766,6 +946,36 @@ namespace Ryujinx.HLE.HOS
             {
                 tamperMachine.EnableCheats(File.ReadAllLines(enabledCheatsPath));
             }
+        }
+
+        /// <summary>
+        /// Applique aux programmes les correctifs INTEGRES au binaire (Splatoon 3), sans jamais
+        /// toucher au disque. Meme mecanique que ApplyProgramPatches : on apparie par identifiant de
+        /// build, puis on ecrit avec le decalage 0x100 propre aux NSO (l'en-tete n'est pas dans
+        /// Program).
+        /// </summary>
+        private static bool AppliquerCorrectifsIntegres(params ReadOnlySpan<IExecutable> programs)
+        {
+            int count = 0;
+
+            for (int i = 0; i < programs.Length; ++i)
+            {
+                if (programs[i] is not NsoExecutable nso)
+                {
+                    continue;
+                }
+
+                MemPatch patch = new();
+
+                if (NextendoS3Patches.Verser(Convert.ToHexString(nso.BuildId).TrimEnd('0'), patch) == 0)
+                {
+                    continue;
+                }
+
+                count += patch.Patch(programs[i].Program, 0x100);
+            }
+
+            return count > 0;
         }
 
         private static bool ApplyProgramPatches(IEnumerable<Mod<DirectoryInfo>> mods, int protectedOffset, params ReadOnlySpan<IExecutable> programs)

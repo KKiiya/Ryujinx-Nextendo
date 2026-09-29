@@ -17,7 +17,7 @@ namespace Ryujinx.Ava.Systems.Configuration
         /// <summary>
         /// The current version of the file format
         /// </summary>
-        public const int CurrentVersion = 73;
+        public const int CurrentVersion = 75;
 
         /// <summary>
         /// Version of the configuration file format
@@ -477,6 +477,16 @@ namespace Ryujinx.Ava.Systems.Configuration
         public string LdnServer { get; set; }
 
         /// <summary>
+        /// LAN Play relay server (host:port, optionally prefixed with user:password@)
+        /// </summary>
+        public string MultiplayerLanPlayServer { get; set; }
+
+        /// <summary>
+        /// Virtual 10.13.x.x address used on the LAN Play network, or empty for an automatic one
+        /// </summary>
+        public string MultiplayerLanPlayVirtualIp { get; set; }
+
+        /// <summary>
         /// Uses Hypervisor over JIT if available
         /// </summary>
         public bool UseHypervisor { get; set; }
@@ -515,6 +525,11 @@ namespace Ryujinx.Ava.Systems.Configuration
         /// Pause emulation while scanning Amiibo
         /// </summary>
         public bool PauseEmulationWhileScanningAmiibo { get; set; }
+
+        /// <summary>
+        /// [Nextendo] Path to the wallpaper image shown behind the Switch-style launcher
+        /// </summary>
+        public string WallpaperPath { get; set; }
 
         /// <summary>
         /// Loads a configuration file from disk

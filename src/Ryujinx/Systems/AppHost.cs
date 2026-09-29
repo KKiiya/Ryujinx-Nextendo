@@ -216,6 +216,8 @@ namespace Ryujinx.Ava.Systems
             ConfigurationState.Instance.Multiplayer.LdnPassphrase.Event += UpdateLdnPassphraseState;
             ConfigurationState.Instance.Multiplayer.LdnServer.Event += UpdateLdnServerState;
             ConfigurationState.Instance.Multiplayer.DisableP2p.Event += UpdateDisableP2pState;
+            ConfigurationState.Instance.Multiplayer.LanPlayServer.Event += UpdateLanPlayServerState;
+            ConfigurationState.Instance.Multiplayer.LanPlayVirtualIp.Event += UpdateLanPlayVirtualIpState;
 
             ConfigurationState.Instance.Debug.EnableGdbStub.Event += UpdateEnableGdbStubState;
             ConfigurationState.Instance.Debug.GdbStubPort.Event += UpdateGdbStubPortState;
@@ -544,6 +546,25 @@ namespace Ryujinx.Ava.Systems
         private void UpdateMultiplayerModeState(object sender, ReactiveEventArgs<MultiplayerMode> e)
         {
             Device.Configuration.MultiplayerMode = e.NewValue;
+
+            // Applied straight away so the change is not stuck until the next boot: selecting LAN Play joins
+            // the relay, and leaving it puts the emulated console back on the host network for everything
+            // else it connects to.
+            Device.System.ApplyMultiplayerConfiguration();
+        }
+
+        private void UpdateLanPlayServerState(object sender, ReactiveEventArgs<string> e)
+        {
+            Device.Configuration.MultiplayerLanPlayServer = e.NewValue;
+
+            Device.System.ApplyMultiplayerConfiguration();
+        }
+
+        private void UpdateLanPlayVirtualIpState(object sender, ReactiveEventArgs<string> e)
+        {
+            Device.Configuration.MultiplayerLanPlayVirtualIp = e.NewValue;
+
+            Device.System.ApplyMultiplayerConfiguration();
         }
 
         private void UpdateLdnPassphraseState(object sender, ReactiveEventArgs<string> e)
@@ -661,6 +682,9 @@ namespace Ryujinx.Ava.Systems
             ConfigurationState.Instance.Graphics.ScalingFilterLevel.Event -= UpdateScalingFilterLevel;
             ConfigurationState.Instance.Graphics.AntiAliasing.Event -= UpdateAntiAliasing;
             ConfigurationState.Instance.Graphics.EnableColorSpacePassthrough.Event -= UpdateColorSpacePassthrough;
+            ConfigurationState.Instance.Multiplayer.Mode.Event -= UpdateMultiplayerModeState;
+            ConfigurationState.Instance.Multiplayer.LanPlayServer.Event -= UpdateLanPlayServerState;
+            ConfigurationState.Instance.Multiplayer.LanPlayVirtualIp.Event -= UpdateLanPlayVirtualIpState;
 
             _topLevel.PointerMoved -= TopLevel_PointerEnteredOrMoved;
             _topLevel.PointerEntered -= TopLevel_PointerEnteredOrMoved;
@@ -1299,6 +1323,21 @@ namespace Ryujinx.Ava.Systems
         {
             if (!_isActive)
             {
+                return false;
+            }
+
+            // [Nextendo] The guest's foreground process has ended on its own — e.g. the Mii
+            // editor applet when the player closes it with B, or a game that quits to home.
+            // Without this, the host loop keeps spinning on a 0 FPS "home" screen forever;
+            // ending the frame loop makes Start() unwind into DisposeContext -> AppExit, and
+            // the UI returns to the launcher cleanly.
+            if (Device.Processes.ActiveApplication is null)
+            {
+                Logger.Info?.Print(LogClass.Application,
+                    "[Nextendo] guest main process exited; stopping emulation");
+
+                _isActive = false;
+
                 return false;
             }
 

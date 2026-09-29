@@ -34,7 +34,14 @@ namespace Ryujinx.HLE.HOS.Services.Sockets.Bsd
         {
             if (errorCode != LinuxError.SUCCESS)
             {
-                if (errorCode != LinuxError.EWOULDBLOCK)
+                // [Nextendo] L'ETIMEDOUT d'une re-verification de sondage differe n'est JAMAIS remis a
+                // l'invite : CompleteReadyDeferredPolls jette la reponse tant que PollResult == 0. Le tracer
+                // produisait des dizaines de milliers de lignes trompeuses (« poll(timeout=-1) a expire », ce
+                // qui est impossible) et, au rythme de re-verification d'une milliseconde, bloquerait le fil
+                // Bsd sur la file bornee du journaliseur — donc etranglerait le transport qu'on accelere.
+                bool discardedDeferredRecheck = errorCode == LinuxError.ETIMEDOUT && context.PollForceNonBlocking;
+
+                if (errorCode != LinuxError.EWOULDBLOCK && !discardedDeferredRecheck)
                 {
                     Logger.Warning?.Print(LogClass.ServiceBsd, $"Operation failed with error {errorCode}.");
                 }
@@ -107,7 +114,8 @@ namespace Ryujinx.HLE.HOS.Services.Sockets.Bsd
 
             try
             {
-                newBsdSocket = new ManagedSocket(netDomain, (SocketType)type, protocol, context.Device.Configuration.MultiplayerLanInterfaceId)
+                ulong programId = context.Device.Processes.GetProcess(context.ClientProcessId).ProgramId;
+                newBsdSocket = new ManagedSocket(netDomain, (SocketType)type, protocol, context.Device.Configuration.MultiplayerLanInterfaceId, programId)
                 {
                     Blocking = !creationFlags.HasFlag(BsdSocketCreationFlags.NonBlocking),
                 };
@@ -364,18 +372,78 @@ namespace Ryujinx.HLE.HOS.Services.Sockets.Bsd
 
             PollEvent[] events = new PollEvent[fdsCount];
 
+            // [Nextendo] Descripteurs morts (fermes) dans un jeu de sondage gRPC : rapportes un par un en
+            // POLLNVAL au lieu de faire echouer tout l'appel avec EBADF. Voir le bloc de decision juste apres
+            // cette boucle.
+            bool[] deadFds = null;
+            int deadFdCount = 0;
+
             for (int i = 0; i < fdsCount; i++)
             {
-                PollEventData pollEventData = context.Memory.Read<PollEventData>(inputBufferPosition + (ulong)(i * Unsafe.SizeOf<PollEventData>()));
+                // [Nextendo] Lors d'une re-verification d'un sondage differe, lire le pollfd dans la copie
+                // GEREE prise au moment du report — PAS en memoire invitee. Le tampon de type 0x21 vit dans
+                // la region de pointeurs PARTAGEE de la session, que l'IPC bsd suivant reutilise : on y
+                // relisait le sockaddr d'un connect ulterieur comme des descripteurs -> EBADF sur tout le
+                // sondage -> la boucle d'evenements de gRPC se coincait et le jeu ne quittait jamais son
+                // ecran de chargement. La premiere passe (bloquante) n'a pas de copie et lit l'invite.
+                int pollOff = i * Unsafe.SizeOf<PollEventData>();
+                PollEventData pollEventData = context.PollInputSnapshot != null
+                    ? System.Runtime.InteropServices.MemoryMarshal.Read<PollEventData>(context.PollInputSnapshot.AsSpan(pollOff))
+                    : context.Memory.Read<PollEventData>(inputBufferPosition + (ulong)pollOff);
 
                 IFileDescriptor fileDescriptor = _context.RetrieveFileDescriptor(pollEventData.SocketFd);
 
                 if (fileDescriptor == null)
                 {
-                    return WriteBsdResult(context, -1, LinuxError.EBADF);
+                    // [Nextendo] On le note en POLLNVAL au lieu de faire echouer l'appel entier ici ; le
+                    // choix entre POLLNVAL par descripteur (POSIX/Linux) et EBADF global est tranche plus
+                    // bas, une fois qu'on sait s'il s'agit du sondeur gRPC ou d'un titre NEX.
+                    pollEventData.OutputEvents = PollEventTypeMask.Invalid;
+                    (deadFds ??= new bool[fdsCount])[i] = true;
+                    events[i] = new PollEvent(pollEventData, null);
+
+                    continue;
                 }
 
                 events[i] = new PollEvent(pollEventData, fileDescriptor);
+            }
+
+            // [Nextendo] Un sondage gRPC porte toujours son eventfd de reveil. Le detecter avant de trancher
+            // le sort des descripteurs morts.
+            bool hasEventFdEarly = false;
+            foreach (PollEvent e in events)
+            {
+                if (e.FileDescriptor is EventFileDescriptor)
+                {
+                    hasEventFdEarly = true;
+                    break;
+                }
+            }
+
+            if (deadFds != null)
+            {
+                if (!hasEventFdEarly)
+                {
+                    // Titres NEX (Splatoon 2 / MK8 / SSBU) : garder l'EBADF global d'origine. Leurs boucles
+                    // de sondage sont construites autour et le POLLNVAL par descripteur les avait deja
+                    // regressees — ne pas y toucher.
+                    return WriteBsdResult(context, -1, LinuxError.EBADF);
+                }
+
+                // gRPC : un descripteur ferme dans le jeu de sondage faisait echouer TOUT le sondage avec
+                // EBADF, donc gRPC demolissait le canal et le reconstruisait (cinq cycles de creation /
+                // fermeture de socket, puis abandon). Le poll() de Linux ne fait pas cela : il pose POLLNVAL
+                // dans les revents de cette entree et sert quand meme les autres. Maintenant que les revents
+                // parviennent reellement a l'invite (le chemin differe les perdait), on rapporte POLLNVAL par
+                // descripteur et on continue de sonder les descripteurs vivants.
+                deadFdCount = 0;
+                foreach (bool d in deadFds)
+                {
+                    if (d)
+                    {
+                        deadFdCount++;
+                    }
+                }
             }
 
             List<PollEvent> discoveredEvents = [];
@@ -397,6 +465,14 @@ namespace Ryujinx.HLE.HOS.Services.Sockets.Bsd
 
             foreach (PollEvent evnt in events)
             {
+                // [Nextendo] Un descripteur mort ne porte aucun objet : il a deja recu sa reponse POLLNVAL et
+                // n'a pas de gestionnaire de sondage, donc il ne doit pas etre pris pour un type de
+                // descripteur non pris en charge.
+                if (evnt.FileDescriptor == null)
+                {
+                    continue;
+                }
+
                 if (!discoveredEvents.Contains(evnt))
                 {
                     Logger.Error?.Print(LogClass.ServiceBsd, $"Poll operation is not supported for {evnt.FileDescriptor.GetType().Name}!");
@@ -405,15 +481,14 @@ namespace Ryujinx.HLE.HOS.Services.Sockets.Bsd
                 }
             }
 
-            // [DIAG] Detect a poller that polls its WakeupFd (eventfd) alongside sockets.
-            bool diagHasEventFd = false;
+            bool hasEventFd = false;
             foreach (PollEvent e in events)
             {
-                if (e.FileDescriptor is EventFileDescriptor) { diagHasEventFd = true; break; }
-            }
-            if (diagHasEventFd)
-            {
-                Logger.Info?.Print(LogClass.ServiceBsd, $"[DIAG] Poll with eventfd: {fdsCount} fds, timeout={timeout}");
+                if (e.FileDescriptor is EventFileDescriptor)
+                {
+                    hasEventFd = true;
+                    break;
+                }
             }
 
             int updateCount = 0;
@@ -427,13 +502,26 @@ namespace Ryujinx.HLE.HOS.Services.Sockets.Bsd
                     return error is not LinuxError.SUCCESS and not LinuxError.ETIMEDOUT;
                 }
 
-                if (diagHasEventFd)
+                if (hasEventFd)
                 {
                     // [Nextendo] Deferred Bsd Poll — ONLY when an eventfd is polled alongside
                     // its sockets. Do exactly ONE non-blocking pass; never block the
                     // single Bsd server thread here, or the eventfd Write that must be issued on that
                     // same thread to make this very poll ready would deadlock. Either return a genuine
                     // result now, or DEFER the IPC reply and let the ServerBase loop re-check us later.
+                    //
+                    // [Nextendo] Evaluer CHAQUE gestionnaire de sondage et ACCUMULER — ne pas s'arreter au
+                    // premier qui rapporte quelque chose. gRPC sonde [eventfd, socket] ensemble, mais les deux
+                    // sont repartis sur des gestionnaires differents (_pollManagers[0] = eventfd,
+                    // [1] = socket). L'ancien « if (updateCount > 0) break; » s'arretait au gestionnaire
+                    // eventfd des que celui-ci etait lisible, donc le gestionnaire socket ne tournait jamais
+                    // et le POLLOUT d'un connect asynchrone TERMINE n'etait jamais rapporte. gRPC n'appelait
+                    // alors jamais getsockopt(SO_ERROR) pour clore le connect -> EINPROGRESS bloque -> delai
+                    // de 20 s -> abandon de la couche reseau du jeu, apres une tempete de sondages. Faire
+                    // tourner les deux gestionnaires a chaque passe laisse le POLLOUT du socket remonter a
+                    // cote du reveil eventfd.
+                    int accumUpdate = 0;
+                    bool hadUnexpected = false;
                     for (int i = 0; i < eventsByPollManager.Length; i++)
                     {
                         if (eventsByPollManager[i].Count == 0)
@@ -445,16 +533,45 @@ namespace Ryujinx.HLE.HOS.Services.Sockets.Bsd
 
                         if (IsUnexpectedLinuxError(errno))
                         {
+                            hadUnexpected = true;
                             break;
                         }
 
-                        if (updateCount > 0)
-                        {
-                            break;
-                        }
+                        accumUpdate += updateCount;
+                    }
+
+                    if (!hadUnexpected)
+                    {
+                        // [Nextendo] POSIX compte une entree POLLNVAL comme un descripteur pret : les
+                        // descripteurs morts contribuent donc a la valeur de retour, et c'est aussi ce qui
+                        // empeche ce sondage de rester differe indefiniment.
+                        updateCount = accumUpdate + deadFdCount;
+                        errno = updateCount > 0 ? LinuxError.SUCCESS : LinuxError.ETIMEDOUT;
                     }
 
                     context.PollResult = updateCount;
+
+                    // [Nextendo] Vider l'eventfd de reveil qu'on rapporte lisible, pour le rendre a front
+                    // montant. gRPC ecrit dans son eventfd de reveil mais n'emet jamais le read() qui le
+                    // consomme ici (aucune commande Read observee ; la valeur de l'eventfd montait sans fin),
+                    // donc le descripteur restait lisible en permanence : le sondeur tournait sur le reveil et
+                    // n'avancait jamais jusqu'a traiter le socket deja connecte -> le connect ne se terminait
+                    // pas -> abandon sur delai. En vidant ici, le reveil est signale une fois par coup de
+                    // semonce puis efface, si bien qu'un sondage suivant peut rapporter le POLLOUT du socket
+                    // seul et laisser gRPC finir son connect. Restreint aux sondages porteurs d'un eventfd
+                    // (cette branche), donc sans effet sur les sondages eventfd ordinaires.
+                    if (updateCount > 0)
+                    {
+                        Span<byte> drainTmp = stackalloc byte[8];
+                        foreach (PollEvent pe in events)
+                        {
+                            if (pe.FileDescriptor is EventFileDescriptor efd &&
+                                pe.Data.OutputEvents.HasFlag(PollEventTypeMask.Input))
+                            {
+                                efd.Read(out _, drainTmp);
+                            }
+                        }
+                    }
 
                     if (updateCount == 0 && timeout != 0 && !context.PollForceNonBlocking)
                     {
@@ -463,7 +580,16 @@ namespace Ryujinx.HLE.HOS.Services.Sockets.Bsd
                             ? long.MaxValue
                             : PerformanceCounter.ElapsedMilliseconds + timeout;
 
-                        Logger.Info?.Print(LogClass.ServiceBsd, $"[DIAG] Poll DEFERRED (timeout={timeout}) - freeing Bsd thread for eventfd Write IPC");
+                        // [Nextendo] Figer le tableau pollfd en memoire geree pour que chaque re-verification
+                        // relise CES descripteurs, et non ce qu'un IPC bsd ulterieur a ecrit depuis dans la
+                        // region de pointeurs invitee partagee. On recopie depuis les evenements deja
+                        // analyses (SocketFd + InputEvents) ; aucun acces a l'invite.
+                        byte[] snap = new byte[fdsCount * Unsafe.SizeOf<PollEventData>()];
+                        for (int j = 0; j < fdsCount; j++)
+                        {
+                            System.Runtime.InteropServices.MemoryMarshal.Write(snap.AsSpan(j * Unsafe.SizeOf<PollEventData>()), events[j].Data);
+                        }
+                        context.PollInputSnapshot = snap;
 
                         // Return WITHOUT writing a response. ServerBase.Process sees PollDeferRequested
                         // and registers a DeferredPoll instead of replying.
@@ -508,10 +634,20 @@ namespace Ryujinx.HLE.HOS.Services.Sockets.Bsd
                 context.Device.System.KernelContext.Syscall.SleepThread(timeout);
             }
 
-            // TODO: Spanify
-            for (int i = 0; i < fdsCount; i++)
+            // [Nextendo] N'ecrire les revents en memoire invitee que lorsqu'on rend vraiment un resultat : un
+            // descripteur est pret (updateCount > 0), ou bien il s'agit d'un sondage normal bloquant / a coup
+            // unique (pas d'une re-verification differee). Sur une re-verification differee encore infructueuse
+            // il ne FAUT pas ecrire : le tampon de sortie se trouve dans la region de pointeurs partagee qu'un
+            // IPC bsd ulterieur est peut-etre en train d'utiliser, et l'ecraser corrompt cet IPC (par exemple
+            // le sockaddr d'un connect, ce qui se solde par un echec d'authentification). Quand le sondage
+            // aboutit enfin, ce bloc s'execute et l'invite lit des revents frais juste apres la reponse.
+            if (updateCount > 0 || !context.PollForceNonBlocking)
             {
-                context.Memory.Write(outputBufferPosition + (ulong)(i * Unsafe.SizeOf<PollEventData>()), events[i].Data);
+                // TODO: Spanify
+                for (int i = 0; i < fdsCount; i++)
+                {
+                    context.Memory.Write(outputBufferPosition + (ulong)(i * Unsafe.SizeOf<PollEventData>()), events[i].Data);
+                }
             }
 
             // In case of non blocking call timeout should not be returned.
@@ -748,9 +884,26 @@ namespace Ryujinx.HLE.HOS.Services.Sockets.Bsd
 
             if (socket != null)
             {
-                IPEndPoint endPoint = context.Memory.Read<BsdSockAddr>(bufferPosition).ToIPEndPoint();
+                // [Nextendo] Se PREMUNIR contre un tampon sockaddr nul ou trop court au lieu de planter :
+                // une fois la resolution de noms reparee, le client gRPC atteint un chemin de connect qui
+                // passait pos=0 / une taille inferieure a la structure, et Read<BsdSockAddr> faisait tomber
+                // l'emulateur sur une reference nulle. On rend EINVAL, comme le ferait le systeme.
+                if (bufferPosition == 0 || bufferSize < (ulong)Unsafe.SizeOf<BsdSockAddr>())
+                {
+                    return WriteBsdResult(context, -1, LinuxError.EINVAL);
+                }
 
-                errno = socket.Connect(endPoint);
+                try
+                {
+                    IPEndPoint endPoint = context.Memory.Read<BsdSockAddr>(bufferPosition).ToIPEndPoint();
+
+                    errno = socket.Connect(endPoint);
+                }
+                catch (Exception)
+                {
+                    // Lecture impossible a cette adresse : EFAULT, jamais une exception qui remonte.
+                    errno = LinuxError.EFAULT;
+                }
             }
 
             return WriteBsdResult(context, 0, errno);
@@ -1009,9 +1162,6 @@ namespace Ryujinx.HLE.HOS.Services.Sockets.Bsd
             LinuxError errno = LinuxError.EBADF;
             IFileDescriptor file = _context.RetrieveFileDescriptor(fd);
             int result = -1;
-
-            // [DIAG] Capture every Write IPC — especially a resolver's kick of its eventfd WakeupFd.
-            Logger.Info?.Print(LogClass.ServiceBsd, $"[DIAG] Write IPC fd={fd} size={sendSize} type={file?.GetType().Name}");
 
             if (file != null)
             {

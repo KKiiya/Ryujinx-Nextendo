@@ -111,6 +111,11 @@ namespace Ryujinx.Ava.UI.ViewModels
 
 #pragma warning disable MVVMTK0042 // Must stay a normal observable field declaration since this is used as an out parameter target
         [ObservableProperty] private ReadOnlyObservableCollection<ApplicationData> _appsObservableList;
+
+        // [Nextendo] Carousel-specific ordering: favorites, then Nextendo-compatible titles,
+        // then everything else, alphabetical within each group. Independent of the user's
+        // global sort mode so list/grid views are not affected.
+        [ObservableProperty] private ReadOnlyObservableCollection<ApplicationData> _carouselAppsObservableList;
 #pragma warning restore MVVMTK0042
 
         [ObservableProperty] public partial Brush VSyncModeColor { get; set; }
@@ -210,6 +215,26 @@ namespace Ryujinx.Ava.UI.ViewModels
 
         public MainWindow Window { get; init; }
 
+        // [Nextendo] Tile size (width/height) used by the Switch-style game carousel. Driven by
+        // the same "Grid size" slider as the list/grid views (1 = small .. 4 = huge) so both
+        // library modes stay in sync. Bigger tiles than the old fixed 180, sized to leave room
+        // for the selection scale-up without covers stacking on top of each other.
+        private static readonly double[] CarouselItemSizes = { 170, 240, 320, 430 };
+
+        public double CarouselItemSize
+        {
+            get
+            {
+                int gridSize = Math.Clamp(ConfigurationState.Instance.UI.GridSize - 1, 0, CarouselItemSizes.Length - 1);
+                return CarouselItemSizes[gridSize];
+            }
+        }
+
+        // [Nextendo] Carousel viewport width for exactly five tiles (tile + 32px of margins each,
+        // plus the ListBox padding) so the row never shows an arbitrary half-cut tile: you get a
+        // clean 5 on screen, or 4-and-a-half with symmetric peeks when the list overflows.
+        public double CarouselViewportWidth => CarouselItemSize * 5 + 180;
+
         internal AppHost AppHost { get; set; }
 
         public RelayCommand ToggleSkylanderCommand { get; }
@@ -226,6 +251,13 @@ namespace Ryujinx.Ava.UI.ViewModels
                 .Bind(out _appsObservableList)
                 .Subscribe();
 
+            // [Nextendo] Second, fixed-order pipeline that only feeds the game carousel.
+            Applications.ToObservableChangeSet()
+                .Filter(Filter)
+                .Sort(GetCarouselComparer())
+                .Bind(out _carouselAppsObservableList)
+                .Subscribe();
+
             _rendererWaitEvent = new AutoResetEvent(false);
 
             LocaleManager.Instance.PropertyChanged += (sender, args) =>
@@ -239,6 +271,7 @@ namespace Ryujinx.Ava.UI.ViewModels
 
                 IsRyuLdnEnabled = ConfigurationState.Instance.Multiplayer.Mode.Value is MultiplayerMode.LdnRyu;
                 ConfigurationState.Instance.Multiplayer.Mode.Event += OnLdnModeChanged;
+                ConfigurationState.Instance.UI.ShowNames.Event += OnShowNamesChanged;
 
                 Volume = ConfigurationState.Instance.System.AudioVolume;
                 CustomVSyncInterval = ConfigurationState.Instance.Graphics.CustomVSyncInterval.Value;
@@ -252,8 +285,12 @@ namespace Ryujinx.Ava.UI.ViewModels
             if (Program.PreviewerDetached)
             {
                 ConfigurationState.Instance.Multiplayer.Mode.Event -= OnLdnModeChanged;
+                ConfigurationState.Instance.UI.ShowNames.Event -= OnShowNamesChanged;
             }
         }
+
+        private void OnShowNamesChanged(object sender, ReactiveEventArgs<bool> e) =>
+            OnPropertyChanged(nameof(CarouselShowNames));
 
         private void OnLdnModeChanged(object sender, ReactiveEventArgs<MultiplayerMode> e) =>
             Dispatcher.UIThread.Post(() =>
@@ -301,9 +338,14 @@ namespace Ryujinx.Ava.UI.ViewModels
             // the badge next to each supported game reads them.
             Ryujinx.Ava.Common.NextendoOnlineCounts.Start(applicationLibrary);
 
-            // [Nextendo] And watch for incoming friend requests, so an invite surfaces on its own
-            // instead of waiting for the player to go looking for it.
-            Ryujinx.Ava.Common.NextendoFriendRequestWatcher.Start();
+            // [Nextendo] And the Discord-style avatars of friends currently playing each game,
+            // shown as overlapping round pictures on the right of the game row.
+            Ryujinx.Ava.Common.NextendoFriendActivity.Start(applicationLibrary);
+
+            // [Nextendo] Friend requests (and friends starting a game) now surface as in-game toasts
+            // ONLY — NextendoInGameNotifications, wired via NextendoNotificationOverlayWindow.Attach —
+            // and only for events after launch. The old emulator-wide bottom-right request popup is
+            // intentionally not started, so notifications never appear outside a game.
         }
 
         #region Properties
@@ -531,12 +573,23 @@ namespace Ryujinx.Ava.UI.ViewModels
             }
         }
 
+        public ApplicationData CarouselSelectedApplication
+        {
+            get;
+            set
+            {
+                field = value;
+                OnPropertyChanged();
+            }
+        }
+
         public ApplicationData SelectedApplication
         {
             get
             {
                 return Glyph switch
                 {
+                    Glyph.Home => CarouselSelectedApplication,
                     Glyph.List => ListSelectedApplication,
                     Glyph.Grid => GridSelectedApplication,
                     _ => null,
@@ -546,6 +599,7 @@ namespace Ryujinx.Ava.UI.ViewModels
             {
                 ListSelectedApplication = value;
                 GridSelectedApplication = value;
+                CarouselSelectedApplication = value;
             }
         }
 
@@ -671,7 +725,14 @@ namespace Ryujinx.Ava.UI.ViewModels
         }
 
         public bool IsGrid => Glyph == Glyph.Grid;
+
         public bool IsList => Glyph == Glyph.List;
+
+        // [Nextendo] Le mode de vue est PERSISTE, comme la liste et la grille l'etaient deja :
+        // il se lit dans UI.GameListViewMode via Glyph. C'etait auparavant un champ fixe a
+        // `true`, si bien que le carrousel revenait a chaque demarrage meme apres avoir choisi
+        // la liste — le choix du joueur ne survivait pas a la fermeture.
+        public bool IsCarousel => Glyph == Glyph.Home;
 
         internal void Sort(bool isAscending)
         {
@@ -750,6 +811,7 @@ namespace Ryujinx.Ava.UI.ViewModels
                 OnPropertyChanged();
                 OnPropertyChanged(nameof(IsGrid));
                 OnPropertyChanged(nameof(IsList));
+                OnPropertyChanged(nameof(IsCarousel));
 
                 ConfigurationState.Instance.ToFileFormat().SaveConfig(Program.ConfigurationPath);
             }
@@ -769,6 +831,11 @@ namespace Ryujinx.Ava.UI.ViewModels
                 ConfigurationState.Instance.ToFileFormat().SaveConfig(Program.ConfigurationPath);
             }
         }
+
+        // [Nextendo] Carousel-only read of the "Mostrar Nombres" option. No GridSize gating: it
+        // simply decides whether the selected game's name appears under the cover in the carousel.
+        // Raised live via OnShowNamesChanged so a Settings toggle applies immediately.
+        public bool CarouselShowNames => ConfigurationState.Instance.UI.ShowNames;
 
         internal ApplicationSort SortMode
         {
@@ -833,6 +900,8 @@ namespace Ryujinx.Ava.UI.ViewModels
                 OnPropertyChanged(nameof(IsGridHuge));
                 OnPropertyChanged(nameof(ListItemSelectorSize));
                 OnPropertyChanged(nameof(GridItemSelectorSize));
+                OnPropertyChanged(nameof(CarouselItemSize));
+                OnPropertyChanged(nameof(CarouselViewportWidth));
                 OnPropertyChanged(nameof(ShowNames));
 
                 ConfigurationState.Instance.ToFileFormat().SaveConfig(Program.ConfigurationPath);
@@ -963,6 +1032,28 @@ namespace Ryujinx.Ava.UI.ViewModels
 #pragma warning restore IDE0055
             };
 
+        // [Nextendo] Fixed carousel order: favorites first, then Nextendo-compatible games,
+        // then the rest — alphabetical (case-insensitive) inside each group.
+        private static IComparer<ApplicationData> GetCarouselComparer()
+        {
+            return Comparer<ApplicationData>.Create((a, b) =>
+            {
+                int favorite = b.Favorite.CompareTo(a.Favorite);
+                if (favorite != 0)
+                {
+                    return favorite;
+                }
+
+                int nextendo = b.IsNextendoCompatible.CompareTo(a.IsNextendoCompatible);
+                if (nextendo != 0)
+                {
+                    return nextendo;
+                }
+
+                return string.Compare(a.Name, b.Name, StringComparison.OrdinalIgnoreCase);
+            });
+        }
+
         public void RefreshView()
         {
             RefreshGrid();
@@ -977,6 +1068,15 @@ namespace Ryujinx.Ava.UI.ViewModels
                 .AsObservableList();
 
             AppsObservableList = apps;
+
+            // [Nextendo] Rebuild the carousel's fixed ordering too (its comparer ignores SortMode).
+            IObservableList<ApplicationData> carouselAppsList = Applications.ToObservableChangeSet()
+                .Filter(Filter)
+                .Sort(GetCarouselComparer())
+                .Bind(out ReadOnlyObservableCollection<ApplicationData> carouselApps)
+                .AsObservableList();
+
+            CarouselAppsObservableList = carouselApps;
         }
 
         private bool Filter(object arg)
@@ -1537,9 +1637,30 @@ namespace Ryujinx.Ava.UI.ViewModels
 
         public void ToggleShowConsole() => ShowConsole = !ShowConsole;
 
-        public void SetListMode() => Glyph = Glyph.List;
+        private void NotifyViewModes()
+        {
+            OnPropertyChanged(nameof(IsCarousel));
+            OnPropertyChanged(nameof(IsList));
+            OnPropertyChanged(nameof(IsGrid));
+        }
 
-        public void SetGridMode() => Glyph = Glyph.Grid;
+        public void SetListMode()
+        {
+            Glyph = Glyph.List;
+            NotifyViewModes();
+        }
+
+        public void SetGridMode()
+        {
+            Glyph = Glyph.Grid;
+            NotifyViewModes();
+        }
+
+        public void SetCarouselMode()
+        {
+            Glyph = Glyph.Home;
+            NotifyViewModes();
+        }
 
         public void SetAspectRatio(AspectRatio aspectRatio) =>
             ConfigurationState.Instance.Graphics.AspectRatio.Value = aspectRatio;
@@ -1910,6 +2031,34 @@ namespace Ryujinx.Ava.UI.ViewModels
                 return;
             }
 
+            // [Nextendo] Splatoon 3 : prevenir AVANT le lancement que les mods installes seront
+            // ignores.
+            //
+            // Sans ce message, un joueur qui a pose un mod le verrait simplement ne rien faire et
+            // conclurait a un bug de l'emulateur. On le dit donc explicitement, on nomme les mods
+            // concernes, et on precise que le jeu demarre quand meme — l'interdiction ne bloque pas
+            // la partie, elle neutralise le mod. Voir ModLoader.ModsInterdits.
+            if (Ryujinx.HLE.HOS.ModLoader.ModsInterdits(application.Id))
+            {
+                List<string> modsIgnores = Ryujinx.HLE.HOS.ModLoader.ModsInstallesPour(application.Id);
+
+                if (modsIgnores.Count > 0)
+                {
+                    // On affiche le CHEMIN de chaque dossier, et on dit d'où il vient. Le nom seul
+                    // valait « exefs » quand le mod est posé à plat sous le dossier du titre : un
+                    // joueur qui n'a rien installé lisait une accusation sans savoir quoi regarder.
+                    await ContentDialogHelper.CreateInfoDialog(
+                        LocaleManager.Instance[LocaleKeys.Dialog_Nextendo_ModsBlockedTitle],
+                        LocaleManager.GetFormatted(
+                            LocaleKeys.Dialog_Nextendo_ModsBlockedMessage,
+                            string.Join("\n", modsIgnores.Select(m => "• " + m))
+                                + "\n\n" + LocaleManager.Instance[LocaleKeys.Dialog_Nextendo_ModsBlockedWhere]),
+                        LocaleManager.Instance[LocaleKeys.InputDialogOk],
+                        string.Empty,
+                        "Nextendo Network");
+                }
+            }
+
             // [Nextendo] Pre-launch online gate. Online presents the anonymous NEX id
             // (NetworkServiceAccountId => 0xcafe, which the gated server refuses) — i.e. online
             // is BLOCKED, not just warned — when ANY of these hold:
@@ -1918,7 +2067,12 @@ namespace Ryujinx.Ava.UI.ViewModels
             //   - this title is on a version the server doesn't support;
             //   - no online profile exists yet (a guest profile counts as linked).
             // Surface the reason(s) in a single dialog; offline play is never affected.
-            if (application.IsNextendoCompatible)
+            // [Nextendo] En mode « serveur personnalisé », toute cette porte saute : elle
+            // interroge NOTRE serveur (interrupteur d'arrêt, version supportée) et exige un
+            // compte chez NOUS. Quelqu'un qui joue sur son propre serveur n'a rien à voir avec
+            // ces conditions, et les lui appliquer reviendrait à l'empêcher de jouer au nom
+            // d'un service qu'il a justement désactivé.
+            if (application.IsNextendoCompatible && !NextendoServerOverride.HorsNextendo)
             {
                 // Evaluate the gate FRESH every launch — OnlineBlocked is runtime-only, so reset
                 // it first or a stale "blocked" from a previous launch (or a since-created guest)
@@ -1989,35 +2143,14 @@ namespace Ryujinx.Ava.UI.ViewModels
                 }
             }
 
-            // [Nextendo] Offer the online schedule (BCAT byaml) for titles that need it
-            // (Splatoon 2) — it is NOT bundled with the emulator. We download it from the
-            // Nextendo server into <exe dir>/bcat-seed/. Without it the game bounces "offline".
-            if (application.RequiresNextendoByaml
-                && !Ryujinx.Ava.Common.NextendoByamlSync.IsInstalled(application)
-                && !Ryujinx.Ava.Common.NextendoByamlSync.IsSkipped(application.IdString))
+            // [Nextendo] Force-sync the online schedule (BCAT byaml) with the server on every launch
+            // of a title that needs it (Splatoon 2). The old flow only offered a download when NO
+            // schedule existed locally and never re-checked, so players kept an outdated rotation and
+            // hit "communication errors" against players on the current one. Now we compare the local
+            // schedule's hash to the server's and force a silent refresh when they differ.
+            if (application.RequiresNextendoByaml)
             {
-                UserResult byamlChoice = await ContentDialogHelper.CreateDeniableConfirmationDialog(
-                    LocaleManager.GetFormatted(LocaleKeys.Dialog_Nextendo_ByamlNeedScheduleFormat, application.Name),
-                    LocaleManager.Instance[LocaleKeys.Dialog_Nextendo_ByamlScheduleDescription],
-                    LocaleManager.Instance[LocaleKeys.Dialog_Nextendo_ByamlDownloadButtonYes],
-                    LocaleManager.Instance[LocaleKeys.Dialog_Nextendo_ByamlDownloadButtonNo],
-                    LocaleManager.Instance[LocaleKeys.Dialog_Nextendo_ByamlDownloadButtonDontAsk],
-                    "Nextendo Network");
-
-                if (byamlChoice == UserResult.Yes)
-                {
-                    bool byamlOk = await Ryujinx.Ava.Common.NextendoByamlSync.DownloadAndInstallAsync(application);
-                    await ContentDialogHelper.CreateInfoDialog(
-                        byamlOk ? LocaleManager.Instance[LocaleKeys.Dialog_Nextendo_ByamlScheduleInstalledTitle] : LocaleManager.Instance[LocaleKeys.Dialog_Nextendo_ByamlScheduleDownloadFailedTitle],
-                        byamlOk
-                            ? LocaleManager.Instance[LocaleKeys.Dialog_Nextendo_ByamlScheduleInstalledMessage]
-                            : LocaleManager.Instance[LocaleKeys.Dialog_Nextendo_ByamlScheduleDownloadFailedMessage],
-                        LocaleManager.Instance[LocaleKeys.InputDialogOk], string.Empty, "Nextendo Network");
-                }
-                else if (byamlChoice == UserResult.Cancel) // "Ne plus demander"
-                {
-                    Ryujinx.Ava.Common.NextendoByamlSync.MarkSkipped(application.IdString);
-                }
+                await Ryujinx.Ava.Common.NextendoByamlSync.EnsureUpToDateAsync(application);
             }
 
             // [Nextendo] Download this title's cloud save and apply it BEFORE the game
@@ -2025,7 +2158,32 @@ namespace Ryujinx.Ava.UI.ViewModels
             // launching this game).
             if (application.IsNextendoVersionOk && Ryujinx.Common.Configuration.NextendoAccount.IsLinked)
             {
-                await Ryujinx.Ava.Common.NextendoSaveSync.PullAsync(application);
+                // [Nextendo] If the local save folder is EMPTY but the account has a cloud save,
+                // ask the player (Switch-style) before starting: download it, or launch anyway with
+                // a warning that a fresh save will overwrite the cloud copy on the next sync. When the
+                // local save already has content we never touch it — the push keeps the cloud backed up.
+                if (!Ryujinx.Ava.Common.ApplicationHelper.LocalSaveHasContent(application.Id))
+                {
+                    byte[] cloudSave = await Ryujinx.Ava.Common.NextendoSaveSync.FetchCloudSaveAsync(application);
+                    if (cloudSave is { Length: > 0 })
+                    {
+                        // The overwrite warning is shown INSIDE the download prompt (not after), so the
+                        // player knows up-front that launching without downloading will overwrite the cloud copy.
+                        UserResult saveChoice = await ContentDialogHelper.CreateConfirmationDialog(
+                            LocaleManager.Instance[LocaleKeys.Dialog_Nextendo_CloudSaveEmptyTitle],
+                            LocaleManager.GetFormatted(LocaleKeys.Dialog_Nextendo_CloudSaveEmptyFormat, application.Name)
+                                + "\n\n" + LocaleManager.Instance[LocaleKeys.Dialog_Nextendo_CloudSaveOverwriteWarn],
+                            LocaleManager.Instance[LocaleKeys.Dialog_Nextendo_CloudSaveDownloadBtn],
+                            LocaleManager.Instance[LocaleKeys.Dialog_Nextendo_CloudSaveLaunchWithoutBtn],
+                            "Nextendo Network",
+                            iconSymbol: 0xE753); // Segoe cloud glyph instead of the "?" icon
+
+                        if (saveChoice == UserResult.Yes)
+                        {
+                            Ryujinx.Ava.Common.ApplicationHelper.ImportNextendoSave(application.Id, application.ControlHolder, cloudSave);
+                        }
+                    }
+                }
             }
 
             // [Nextendo] Offer the shared community shader cache — only when the user runs the
@@ -2109,6 +2267,7 @@ namespace Ryujinx.Ava.UI.ViewModels
                 _nextendoSaveTimer?.Dispose();
                 _nextendoSaveTimer = null;
                 await FlushNextendoSaveAsync();
+                await Ryujinx.Ava.Common.NextendoHistorySync.PushAsync("load-cancel");
                 return;
             }
             finally
@@ -2139,6 +2298,8 @@ namespace Ryujinx.Ava.UI.ViewModels
             _nextendoSaveTimer = null;
             if (application.IsNextendoVersionOk && Ryujinx.Common.Configuration.NextendoAccount.IsLinked)
             {
+                // Track the playing title so the crash handler can push its save best-effort.
+                Ryujinx.Ava.Common.NextendoSaveSync.Playing = (application.Id, application.IdString);
                 _nextendoSaveTimer = new System.Threading.Timer(
                     _ => { if (IsGameRunning) { _ = FlushNextendoSaveAsync(); } },
                     null, TimeSpan.FromSeconds(60), TimeSpan.FromMinutes(3));
@@ -2216,6 +2377,12 @@ namespace Ryujinx.Ava.UI.ViewModels
 
             IsGameRunning = false;
 
+            // [Nextendo] Push play history now the game has ended (the Stop action or a caught crash).
+            // AppHost.Dispose already wrote this session's play time to the title's metadata, so the
+            // push includes it. Fire-and-forget: the UI returns to the game list either way. The
+            // window-close path (Alt+F4) is handled separately in MainWindow.OnClosing, which awaits it.
+            _ = Ryujinx.Ava.Common.NextendoHistorySync.PushAsync("game-exit");
+
             Dispatcher.UIThread.InvokeAsync(async () =>
             {
                 ShowMenuAndStatusBar = true;
@@ -2228,6 +2395,15 @@ namespace Ryujinx.Ava.UI.ViewModels
                 SetMainContent(null);
 
                 AppHost = null;
+
+                // [Nextendo] Push the save on a normal Stop / Restart before the UI returns or the
+                // game reloads. Without this, Stop/Restart relied only on the periodic 3-min timer,
+                // so the last few minutes of progress could be lost. Alt+F4 is handled separately in
+                // MainWindow.OnClosing; abnormal exits are still covered by the periodic push.
+                _nextendoSaveTimer?.Dispose();
+                _nextendoSaveTimer = null;
+                await FlushNextendoSaveAsync();
+                Ryujinx.Ava.Common.NextendoSaveSync.Playing = null; // normal exit: no crash-flush needed
 
                 await HandleRelaunch();
             });
@@ -2248,6 +2424,12 @@ namespace Ryujinx.Ava.UI.ViewModels
         /// be opened, read and left open while a game keeps running.
         /// </summary>
         public void OpenNextendoFriends() => NextendoFriendsWindow.Open();
+
+        /// <summary>
+        /// [Nextendo] Ctrl+F now opens the launcher profile dialog (the circular profile
+        /// button), which floats above a running game the same way the friends window did.
+        /// </summary>
+        public void OpenNextendoProfile() => RyujinxApp.MainWindow.ApplicationCarousel?.OpenNextendoProfile();
 
         public async Task OpenAmiiboWindow()
         {
@@ -2803,10 +2985,11 @@ namespace Ryujinx.Ava.UI.ViewModels
                 });
 
 
-        // [Nextendo] Open the curated Mod Store for the selected Nextendo-compatible title.
+        // [Nextendo] Open the GameBanana-backed Mod Store for the selected title (any game — the
+        // store lists client-side cosmetic mods for every title, not only Nextendo-compatible ones).
         public static AsyncRelayCommand<MainWindowViewModel> OpenModStore { get; } =
             Commands.CreateConditional<MainWindowViewModel>(
-                vm => vm?.SelectedApplication != null && vm.SelectedApplication.IsNextendoCompatible,
+                vm => vm?.SelectedApplication != null,
                 viewModel => ModStoreView.Show(
                     viewModel.SelectedApplication.Id,
                     viewModel.SelectedApplication.Name));

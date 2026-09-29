@@ -15,7 +15,10 @@ using Ryujinx.Common.Configuration;
 using Ryujinx.Common.Logging;
 using Ryujinx.HLE.FileSystem;
 using Ryujinx.HLE.Loaders.Processes.Extensions;
+using Ryujinx.Ava.UI.Models;
 using System;
+using System.Collections.Generic;
+using System.Collections.ObjectModel;
 using System.IO;
 using System.Linq;
 using System.Text.Json.Serialization;
@@ -64,6 +67,66 @@ namespace Ryujinx.Ava.Systems.AppLibrary
                     ? LocaleKeys.Dialog_Nextendo_PlayerOnlineFormat
                     : LocaleKeys.Dialog_Nextendo_PlayersOnlineFormat,
                 _nextendoPlayersOnline);
+
+        // [Nextendo] Friends currently playing THIS game, shown as overlapping round avatars on the
+        // right of the game row (Discord-style). Pushed by NextendoFriendActivity, capped at 5.
+        private readonly ObservableCollection<NextendoFriendModel> _friendsInGame = [];
+
+        [JsonIgnore]
+        public ObservableCollection<NextendoFriendModel> FriendsInGame => _friendsInGame;
+
+        /// <summary>[Nextendo] True when at least one friend is in this game — drives the avatars row.</summary>
+        [JsonIgnore]
+        public bool HasFriendsInGame => _friendsInGame.Count > 0;
+
+        /// <summary>[Nextendo] Replace the friends-in-this-game set (UI thread) and refresh the row.
+        /// The ObservableCollection notifies the avatars itself; HasFriendsInGame needs a manual raise.</summary>
+        public void SetFriendsInGame(List<NextendoFriendModel> friends)
+        {
+            _friendsInGame.Clear();
+            if (friends != null)
+            {
+                foreach (NextendoFriendModel f in friends)
+                {
+                    _friendsInGame.Add(f);
+                }
+            }
+
+            PropertyChanged?.Invoke(this, new System.ComponentModel.PropertyChangedEventArgs(nameof(HasFriendsInGame)));
+        }
+
+        // [Nextendo] UNCAPPED friend list for the "Friends playing: …" names in the hover
+        // tooltip of the player-count badge, so it never truncates beyond the 5 avatar cap.
+        private readonly ObservableCollection<NextendoFriendModel> _allFriendsInGame = [];
+
+        [JsonIgnore]
+        public ObservableCollection<NextendoFriendModel> AllFriendsInGame => _allFriendsInGame;
+
+        /// <summary>[Nextendo] True when at least one friend is in this game — drives the avatar row.</summary>
+        [JsonIgnore]
+        public bool HasAllFriendsInGame => _allFriendsInGame.Count > 0;
+
+        /// <summary>[Nextendo] Localised "N Friends playing" — shown in the player-count tooltip.</summary>
+        [JsonIgnore]
+        public string FriendsPlayingCountText =>
+            LocaleManager.Instance.UpdateAndGetDynamicValue(
+                LocaleKeys.Dialog_Nextendo_FriendsPlayingFormat, _allFriendsInGame.Count);
+
+        /// <summary>[Nextendo] Replace the uncapped friends set (UI thread) and refresh the tooltip.</summary>
+        public void SetAllFriendsInGame(List<NextendoFriendModel> friends)
+        {
+            _allFriendsInGame.Clear();
+            if (friends != null)
+            {
+                foreach (NextendoFriendModel f in friends)
+                {
+                    _allFriendsInGame.Add(f);
+                }
+            }
+
+            PropertyChanged?.Invoke(this, new System.ComponentModel.PropertyChangedEventArgs(nameof(HasAllFriendsInGame)));
+            PropertyChanged?.Invoke(this, new System.ComponentModel.PropertyChangedEventArgs(nameof(FriendsPlayingCountText)));
+        }
 
         public bool Favorite { get; set; }
         public bool HasIndependentConfiguration { get; set; }
@@ -302,11 +365,53 @@ namespace Ryujinx.Ava.Systems.AppLibrary
         [JsonIgnore]
         public string NextendoCompatibleVersion => IdBaseString switch
         {
-            "0100152000022000" => "3.0.5",  // Mario Kart 8 Deluxe
-            "01006a800016e000" => "13.0.4", // Super Smash Bros. Ultimate
+            // [Nextendo 2026-09-07] 4.0.0, publiee le 1er septembre avec le support Switch 2.
+            // Version MAJEURE, donc on ne l'a pas montee a l'aveugle : verifiee par une COURSE
+            // ENTIERE jouee contre nos serveurs, pas seulement par une connexion reussie — se
+            // connecter et finir une course sont deux choses differentes.
+            //
+            // CTGPDX n'est pas affecte : IsNextendoVersionOk accepte aussi IsCtgpdxVariant, qui
+            // reste sur la base 3.0.3 avec son mod verifie.
+            "0100152000022000" => "4.0.0",  // Mario Kart 8 Deluxe
+            // [Nextendo 2026-09-06] 13.0.5, publiee le 1er septembre. Elle corrige "un probleme
+            // quand des donnees invalides sont envoyees ou recues pendant les combats en ligne",
+            // donc elle DURCIT le client : c'etait le candidat evident a une casse. Verifiee le
+            // 2026-09-06 sur une vraie console contre nos serveurs — arenes et quickplay, zero
+            // methode non geree en quinze minutes avec 79 joueurs connectes. Elle passe.
+            "01006a800016e000" => "13.0.5", // Super Smash Bros. Ultimate
             "0100f8f0000a2000" => "5.5.2",  // Splatoon 2 (EU)
             "01003bc0000a0000" => "5.5.2",  // Splatoon 2 (US)
             "01003c700009c800" => "5.5.2",  // Splatoon 2 (JP)
+            "01006f8002326000" => "3.0.3",  // Animal Crossing: New Horizons
+            "0100dca0064a6000" => "1.4.0",  // Luigi's Mansion 3
+            // [Nextendo 2026-08-21] Splatoon 3 passe a 11.3.0. Les correctifs integres couvrent les
+            // deux versions — memes offsets, verifie en comparant les images decompressees — mais
+            // les faire cohabiter en ligne n'a pas de sens : deux builds differents dans un meme
+            // salon, c'est le desynchronisation assuree. Une seule version supportee a la fois,
+            // comme pour les autres titres.
+            "0100c2500fc20000" => "11.3.0", // Splatoon 3
+            "01008f6008c5e000" => "4.0.0",  // Pokémon Violet
+            "0100a3d008c5c000" => "4.0.0",  // Pokémon Scarlet
+            // [Nextendo 2026-09-08] Super Mario Bros. Wonder. Les correctifs integres (contournement
+            // du certificat epingle + deux rejets de nom de pair) sont lies a l'identifiant de build
+            // FF773E90972D544EB79406EAA65396D53C43EFB9, propre a cette version exacte : une autre
+            // mise a jour ne les recevrait pas et ne pourrait pas parler a nos serveurs.
+            "010015100b514000" => "1.2.1",  // Super Mario Bros. Wonder
+            "01006bd001e06000" => "1.0.17", // Minecraft: Nintendo Switch Edition
+            "01009b500007c000" => "5.5.1",  // ARMS
+            "0100bde00862a000" => "3.1.1",  // Mario Tennis Aces
+            // [Nextendo 2026-09-20] Crash Team Racing Nitro-Fueled runs on Demonware, not NEX.
+            // The built-in patches are keyed to build 1C689518406930512C13DDF4217E7676, which is
+            // specific to this exact version; another update would not receive them.
+            "0100f9f00c696000" => "1.0.15", // Crash Team Racing Nitro-Fueled
+            // [Nextendo 2026-09-08] 1.0.2, PAS 1.1.2. La 1.1.2 n existe pas : la derniere mise a
+            // jour de SMB35 est la 1.0.2 (12 novembre 2020), le jeu ayant ferme en mars 2021.
+            // La table exigeait donc une version impossible et bloquait tout joueur ayant mis a
+            // jour l emulateur en 1.8.2 — signale par ffsaga le 2026-09-08.
+            "0100277011f1a000" => "1.0.2",  // Super Mario Bros. 35
+            "0100ad9012510000" => "1.0.0",  // Pac-Man 99
+            "01009b90006dc000" => "3.0.3",  // Super Mario Maker 2
+            "0100000000010000" => "1.4.1",  // Super Mario Odyssey
             _ => "",
         };
 
@@ -393,13 +498,13 @@ namespace Ryujinx.Ava.Systems.AppLibrary
             IsNextendoCompatible && (Version == NextendoCompatibleVersion || IsCtgpdxVariant
                 || !Ryujinx.Common.ReleaseInformation.IsValid);
 
-        // Only Splatoon 2 needs the BCAT schedule byaml (VS/Coop/Fest schedule). The "download the
-        // online schedule" prompt + context-menu button must appear ONLY for these titles — never
-        // for the other online titles, which don't use it.
+        // Splatoon 2 uses schedule byaml, while Scarlet and Violet use event BCAT.
+        // Only these titles should show the BCAT download action.
         [JsonIgnore]
         public bool RequiresNextendoByaml => IdBaseString switch
         {
-            "0100f8f0000a2000" or "01003bc0000a0000" or "01003c700009c800" => true,
+            "0100f8f0000a2000" or "01003bc0000a0000" or "01003c700009c800" or
+            "01008f6008c5e000" or "0100a3d008c5c000" => true,
             _ => false,
         };
 

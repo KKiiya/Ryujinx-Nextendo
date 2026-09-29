@@ -243,8 +243,16 @@ namespace ARMeilleure.Translation
             }
         }
 
+        // [Nextendo] Global JIT-activity tick, bumped on every function translation (foreground, background
+        // rejit, and PPTC). The NPLN resolution hold (DnsMitmResolver.MaybeDelayNplnInit) polls this to wait
+        // until the early-boot JIT burst actually SETTLES — adaptive, instead of a fixed sleep — so S3's
+        // grpc-core connect starts on a calm system and doesn't deadlock/park mid socket-setup.
+        public static long JitActivityCounter;
+
         internal TranslatedFunction Translate(ulong address, ExecutionMode mode, bool highCq, bool singleStep = false, bool pptcTranslation = false)
         {
+            System.Threading.Interlocked.Increment(ref JitActivityCounter);
+
             ArmEmitterContext context = new(
                 Memory,
                 CountTable,

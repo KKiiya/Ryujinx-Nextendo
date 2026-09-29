@@ -152,6 +152,7 @@ namespace Ryujinx.Ava.Systems.Configuration
             UI.WindowStartup.WindowPositionY.Value = shouldLoadFromFile ? cff.WindowStartup.WindowPositionY : UI.WindowStartup.WindowPositionY.Value;
             UI.WindowStartup.WindowMaximized.Value = shouldLoadFromFile ? cff.WindowStartup.WindowMaximized : UI.WindowStartup.WindowMaximized.Value;
             UI.PauseEmulationWhileScanningAmiibo.Value = cff.PauseEmulationWhileScanningAmiibo;
+            UI.WallpaperPath.Value = shouldLoadFromFile ? (cff.WallpaperPath ?? string.Empty) : UI.WallpaperPath.Value;
 
             Hid.EnableKeyboard.Value = cff.EnableKeyboard;
             Hid.EnableMouse.Value = cff.EnableMouse;
@@ -167,6 +168,8 @@ namespace Ryujinx.Ava.Systems.Configuration
             Multiplayer.DisableP2p.Value = cff.MultiplayerDisableP2p;
             Multiplayer.LdnPassphrase.Value = cff.MultiplayerLdnPassphrase;
             Multiplayer.LdnServer.Value = cff.LdnServer;
+            Multiplayer.LanPlayServer.Value = cff.MultiplayerLanPlayServer;
+            Multiplayer.LanPlayVirtualIp.Value = cff.MultiplayerLanPlayVirtualIp;
 
             Debug.EnableGdbStub.Value = shouldLoadFromFile ? cff.EnableGdbStub : Debug.EnableGdbStub.Value; // Get from global config only
             Debug.GdbStubPort.Value = shouldLoadFromFile ? cff.GdbStubPort : Debug.GdbStubPort.Value; // Get from global config only
@@ -542,7 +545,15 @@ namespace Ryujinx.Ava.Systems.Configuration
                     if (cff.AudioBackend is AudioBackend.SDL2)
                         cff.AudioBackend = AudioBackend.SDL3;
                 }),
-                (72, static cff => cff.GCLowLatency = false)
+                (72, static cff => cff.GCLowLatency = false),
+                (74, static cff =>
+                {
+                    // Initialize LAN Play config.
+
+                    cff.MultiplayerLanPlayServer = string.Empty;
+                    cff.MultiplayerLanPlayVirtualIp = string.Empty;
+                }),
+                (75, static cff => cff.WallpaperPath = string.Empty)
             );
     }
 }
