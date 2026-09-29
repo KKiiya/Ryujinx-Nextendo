@@ -10,6 +10,7 @@
                 <ResourceDictionary>
                     <FontFamily x:Key="JetBrainsMono">avares://Ryujinx/Assets/Fonts/Mono/#JetBrains Mono</FontFamily>
                 </ResourceDictionary>
+                <ResourceInclude Source="/UI/Views/Console/ConsoleStyles.axaml"/>
                 <MergeResourceInclude Source="/Assets/Styles/Themes.xaml"/>
             </ResourceDictionary.MergedDictionaries>
         </ResourceDictionary>
