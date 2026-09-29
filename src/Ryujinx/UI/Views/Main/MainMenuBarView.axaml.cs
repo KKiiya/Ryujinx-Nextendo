@@ -45,6 +45,8 @@ namespace Ryujinx.Ava.UI.Views.Main
             MiiEditorMenuItem.Command = Commands.Create(OpenMiiEditor);
             CloseRyujinxMenuItem.Command = Commands.Create(() => Window?.Close());
             OpenSettingsMenuItem.Command = Commands.Create(OpenSettings);
+            ConsoleViewMenuItem.Command = Commands.Create(() => ViewModel.SetConsoleView());
+            ClassicViewMenuItem.Command = Commands.Create(() => ViewModel.SetClassicView());
             PauseEmulationMenuItem.Command = Commands.Create(() => ViewModel.AppHost?.Pause());
             ResumeEmulationMenuItem.Command = Commands.Create(() => ViewModel.AppHost?.Resume());
             StopEmulationMenuItem.Command = Commands.Create(() => ViewModel.AppHost?.ShowExitPrompt().OrCompleted());

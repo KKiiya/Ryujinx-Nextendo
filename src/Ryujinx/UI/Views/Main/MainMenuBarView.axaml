@@ -240,14 +240,14 @@
             </MenuItem>
             <MenuItem VerticalAlignment="Center" Header="{ext:Locale MenuBarView}">
                 <MenuItem
-                    Command="{Binding SetConsoleView}"
+                    Name="ConsoleViewMenuItem"
                     Padding="0"
                     Header="{ext:Locale Console_ConsoleView}"
                     Icon="{ext:Icon fa-solid fa-gamepad}"
                     Classes="withCheckbox">
                 </MenuItem>
                 <MenuItem
-                    Command="{Binding SetClassicView}"
+                    Name="ClassicViewMenuItem"
                     Padding="0"
                     Header="{ext:Locale Console_ClassicView}"
                     Icon="{ext:Icon fa-solid fa-list}"

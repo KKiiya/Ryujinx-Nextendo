@@ -39,6 +39,11 @@ namespace Ryujinx.Ava.UI.Views.Main
                 ViewModel.Sort(sortOrder is not "Descending");
         }
 
+        public void ConsoleViewButton_OnClick(object sender, RoutedEventArgs args)
+        {
+            ViewModel.SetConsoleView();
+        }
+
         private void SearchBox_OnKeyUp(object sender, KeyEventArgs e)
         {
             ViewModel.SearchText = SearchBox.Text;

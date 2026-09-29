@@ -24,7 +24,7 @@
             MinWidth="40"
             Margin="5,2,0,2"
             VerticalAlignment="Stretch"
-            Command="{Binding SetConsoleView}"
+            Click="ConsoleViewButton_OnClick"
             IsEnabled="{Binding IsClassicView}"
             ToolTip.Tip="{ext:Locale Console_ConsoleView}">
             <i:Icon
