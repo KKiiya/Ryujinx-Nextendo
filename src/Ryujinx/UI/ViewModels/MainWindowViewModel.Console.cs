@@ -21,6 +21,14 @@ namespace Ryujinx.Ava.UI.ViewModels
         public bool IsConsoleView => (LibraryPresentation)ConfigurationState.Instance.UI.LibraryPresentation.Value == LibraryPresentation.Console;
         public bool IsClassicView => !IsConsoleView;
 
+        /// <summary>
+        /// Classic sub-views, gated on the Classic presentation so they never
+        /// render underneath the Console view.
+        /// </summary>
+        public bool IsListActive => IsClassicView && IsList;
+        public bool IsGridActive => IsClassicView && IsGrid;
+        public bool IsCarouselActive => IsClassicView && IsCarousel;
+
         public bool ConsoleReduceAnimations
         {
             get => ConfigurationState.Instance.UI.ConsoleReduceAnimations.Value;
@@ -36,8 +44,7 @@ namespace Ryujinx.Ava.UI.ViewModels
         {
             ConfigurationState.Instance.UI.LibraryPresentation.Value = (int)LibraryPresentation.Console;
             ConfigurationState.Instance.ToFileFormat().SaveConfig(Program.ConfigurationPath);
-            OnPropertyChanged(nameof(IsConsoleView));
-            OnPropertyChanged(nameof(IsClassicView));
+            NotifyLibraryPresentation();
             ConsoleLibrary?.Refresh();
         }
 
@@ -45,8 +52,16 @@ namespace Ryujinx.Ava.UI.ViewModels
         {
             ConfigurationState.Instance.UI.LibraryPresentation.Value = (int)LibraryPresentation.Classic;
             ConfigurationState.Instance.ToFileFormat().SaveConfig(Program.ConfigurationPath);
+            NotifyLibraryPresentation();
+        }
+
+        internal void NotifyLibraryPresentation()
+        {
             OnPropertyChanged(nameof(IsConsoleView));
             OnPropertyChanged(nameof(IsClassicView));
+            OnPropertyChanged(nameof(IsListActive));
+            OnPropertyChanged(nameof(IsGridActive));
+            OnPropertyChanged(nameof(IsCarouselActive));
         }
 
         public void ToggleLibraryPresentation()
