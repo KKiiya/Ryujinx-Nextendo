@@ -124,6 +124,10 @@ namespace Ryujinx.Ava.UI.Views.Console
                     vm.ConsoleLibrary.PropertyChanged += OnConsolePropertyChanged;
                     UpdateEmptyStates();
                 }
+
+                // DataContext can arrive after visual attach (MainWindow sets it in
+                // Load): refresh the avatar here too, not just on attach.
+                RefreshProfileAvatar();
             }
         }
 
