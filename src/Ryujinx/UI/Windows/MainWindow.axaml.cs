@@ -533,6 +533,8 @@ namespace Ryujinx.Ava.UI.Windows
         {
             StatusBarView.VolumeStatus.Click += VolumeStatus_CheckedChanged;
 
+            Activated += (_, _) => RefreshProfileAvatars();
+
             ApplicationGrid.DataContext = ApplicationList.DataContext = ApplicationCarousel.DataContext = ViewModel;
             ConsoleLibrary.DataContext = ViewModel;
 
@@ -540,6 +542,17 @@ namespace Ryujinx.Ava.UI.Windows
             ApplicationList.ApplicationOpened += Application_Opened;
             ApplicationCarousel.ApplicationOpened += Application_Opened;
             ConsoleLibrary.ApplicationOpened += Application_Opened;
+        }
+
+        /// <summary>
+        /// Refreshes the profile avatars (Classic carousel + Console top bar) with the
+        /// current native profile picture. Runs on window activation so profile switches,
+        /// logins/logouts and avatar edits always update the launcher chrome.
+        /// </summary>
+        public void RefreshProfileAvatars()
+        {
+            ApplicationCarousel?.RefreshProfileAvatar();
+            ConsoleLibrary?.RefreshProfileAvatar();
         }
 
         private void SetWindowSizePosition()

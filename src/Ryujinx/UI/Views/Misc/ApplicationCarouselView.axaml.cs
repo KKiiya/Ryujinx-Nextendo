@@ -102,7 +102,7 @@ namespace Ryujinx.Ava.UI.Views.Misc
             _gamepadTimer.Start();
 
             CarouselList.SelectionChanged += CarouselList_SelectionChanged;
-            Loaded += (_, _) => { _ = LoadAvatarAsync(); LoadDiscordSvg(); };
+            Loaded += (_, _) => { RefreshProfileAvatar(); LoadDiscordSvg(); };
             Loaded += (_, _) => LoadWallpaper();
             ConfigurationState.Instance.UI.WallpaperPath.Event += (_, _) => LoadWallpaper();
         }
@@ -865,27 +865,37 @@ namespace Ryujinx.Ava.UI.Views.Misc
             return _menuGamepad;
         }
 
-        private async Task LoadAvatarAsync()
+        /// <summary>
+        /// Refreshes the circular profile button with the CURRENT profile's picture:
+        /// the native Ryujinx image (which is the Nextendo avatar when an account is
+        /// linked), upgraded from the server when linked and reachable. Safe to call
+        /// whenever the window regains focus (profile switches, login/logout, edits).
+        /// </summary>
+        public void RefreshProfileAvatar()
         {
-            // [Nextendo] Profile photo for the circular profile button. Loaded async so the
-            // UI never blocks on the network. Falls back to a blank avatar on failure.
-            if (!NextendoAccount.IsLinked)
-                return;
+            _ = RefreshProfileAvatarAsync();
+        }
 
-            try
+        private async Task RefreshProfileAvatarAsync()
+        {
+            // [Nextendo] Loaded async so the UI never blocks on the network. Falls back
+            // to the native profile picture, then to a blank avatar, on any failure.
+            var vm = DataContext as MainWindowViewModel;
+            (byte[] image, _) = await UserProfileAvatar.GetDisplayAvatarAsync(vm?.AccountManager);
+
+            await Dispatcher.UIThread.InvokeAsync(() =>
             {
-                var profile = await Ryujinx.Ava.Common.NextendoApi.GetProfileSyncAsync();
-                if (profile.image != null && profile.image.Length > 0 && ProfileAvatarImage != null)
+                if (ProfileAvatarImage == null)
                 {
-                    using var mem = new MemoryStream(profile.image);
-                    var bitmap = new Avalonia.Media.Imaging.Bitmap(mem);
+                    return;
+                }
+
+                Bitmap bitmap = UserProfileAvatar.ToBitmap(image);
+                if (bitmap != null)
+                {
                     ProfileAvatarImage.Source = bitmap;
                 }
-            }
-            catch (Exception)
-            {
-                // ignore network/avatar errors
-            }
+            });
         }
 
         private void UpdateClock()

@@ -16,6 +16,7 @@ using Ryujinx.Ava.UI.Controls;
 using Ryujinx.Ava.UI.Helpers;
 using Ryujinx.Ava.UI.ViewModels;
 using Ryujinx.Ava.UI.Windows;
+using Ryujinx.Common.Configuration;
 using Ryujinx.Input;
 using System;
 using System.Collections.Generic;
@@ -101,6 +102,7 @@ namespace Ryujinx.Ava.UI.Views.Console
             AttachViewModel();
             UpdateClock();
             UpdateEmptyStates();
+            RefreshProfileAvatar();
             _ = UpdateBackgroundAsync(CurrentSelectedApp());
         }
 
@@ -443,6 +445,60 @@ namespace Ryujinx.Ava.UI.Views.Console
         }
 
         public void ViewToggle_OnClick(object sender, RoutedEventArgs e) => ViewModel.SetClassicView();
+
+        public void ProfileAvatarButton_OnClick(object sender, RoutedEventArgs e)
+        {
+            // Linked accounts manage identity in the Nextendo profile dialog;
+            // otherwise this opens the native Ryujinx profile manager/switcher.
+            if (NextendoAccount.IsLinked)
+            {
+                RyujinxApp.MainWindow?.ApplicationCarousel?.OpenNextendoProfile();
+            }
+            else
+            {
+                _ = ViewModel.ManageProfiles();
+            }
+        }
+
+        /// <summary>
+        /// Shows the CURRENT profile's picture (native image, i.e. the Nextendo
+        /// avatar when linked). Called on attach and whenever the main window
+        /// regains focus (profile switches, login/logout, avatar edits).
+        /// </summary>
+        public void RefreshProfileAvatar()
+        {
+            _ = RefreshConsoleAvatarAsync();
+        }
+
+        private async Task RefreshConsoleAvatarAsync()
+        {
+            var vm = DataContext as MainWindowViewModel;
+            (byte[] image, string name) = await UserProfileAvatar.GetDisplayAvatarAsync(vm?.AccountManager);
+
+            await Dispatcher.UIThread.InvokeAsync(() =>
+            {
+                Bitmap bitmap = UserProfileAvatar.ToBitmap(image);
+
+                if (ConsoleProfileAvatarImage != null)
+                {
+                    ConsoleProfileAvatarImage.IsVisible = bitmap != null;
+                    if (bitmap != null)
+                    {
+                        ConsoleProfileAvatarImage.Source = bitmap;
+                    }
+                }
+
+                if (ConsoleProfileAvatarFallback != null)
+                {
+                    ConsoleProfileAvatarFallback.IsVisible = bitmap == null;
+                }
+
+                if (ProfileAvatarButton != null && !string.IsNullOrEmpty(name))
+                {
+                    ToolTip.SetTip(ProfileAvatarButton, name);
+                }
+            });
+        }
 
         public void SettingsButton_OnClick(object sender, RoutedEventArgs e)
         {
