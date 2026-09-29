@@ -8,6 +8,7 @@ using System.Collections.Generic;
 using System.Globalization;
 using System.Net;
 using System.Net.Http;
+using System.Net.Http.Headers;
 using System.Net.Sockets;
 using System.Security.Cryptography;
 using System.Text;
@@ -1109,6 +1110,21 @@ namespace Ryujinx.Ava.Common
 
         public static async Task<(bool ok, string error)> SignInWithBrowserAsync()
         {
+            // The OAuth client_id is public by design (PKCE needs no secret), but it MUST
+            // be registered on https://nextendo.network/developers: the server answers
+            // authorize calls from unknown ids with a 403 JSON error instead of the login
+            // page, so launching the browser with one only shows raw JSON while the
+            // loopback wait below hangs for 5 minutes. Resolve in order: dev override
+            // (NEXTENDO_CLIENT_ID, for unbaked builds), then the baked official id.
+            string clientId = ResolveOAuthClientId();
+            if (string.IsNullOrEmpty(clientId))
+            {
+                return (false,
+                    "Aucun identifiant d'application Nextendo. Les builds officielles en incluent un ; " +
+                    "pour un build de développement, créez une application sur https://nextendo.network/developers " +
+                    "puis définissez la variable d'environnement NEXTENDO_CLIENT_ID avec son client_id.");
+            }
+
             // PKCE (S256) + a CSRF `state` we verify on the way back.
             string verifier = RandUrl(32);
             string challenge = Base64Url(SHA256.HashData(Encoding.ASCII.GetBytes(verifier)));
@@ -1134,11 +1150,24 @@ namespace Ryujinx.Ava.Common
             }
 
             string redirectUri = $"http://127.0.0.1:{port}/callback";
-            string clientId = string.IsNullOrEmpty(NextendoAppSecrets.AppToken) ? "unregistered" : NextendoAppSecrets.AppToken;
+            // Scopes are space-delimited (RFC 6749): encode the spaces as %20. A raw `+`
+            // also decodes to space on most servers, but %20 is unambiguous in a query string.
+            string scope = Uri.EscapeDataString("identity friends sauvegardes history presence");
             string authorizeUrl =
                 $"{BaseUrl()}/api/oauth/authorize?response_type=code&client_id={Uri.EscapeDataString(clientId)}" +
-                $"&redirect_uri={Uri.EscapeDataString(redirectUri)}&scope=identity+friends+sauvegardes+history+presence&app=ryujinx" +
+                $"&redirect_uri={Uri.EscapeDataString(redirectUri)}&scope={scope}&app=ryujinx" +
                 $"&state={state}&code_challenge={challenge}&code_challenge_method=S256";
+
+            // Fail fast: GET the authorize URL before touching the browser. A registered
+            // client_id gets the login page (or a redirect to it); an unknown/revoked one
+            // gets a definitive JSON error — surfacing that now beats a raw-JSON browser tab
+            // plus a 5-minute loopback wait. Anything inconclusive lets the browser try anyway.
+            string preflightError = await CheckAuthorizeReachableAsync(authorizeUrl);
+            if (preflightError != null)
+            {
+                listener.Stop();
+                return (false, preflightError);
+            }
 
             try
             {
@@ -1207,6 +1236,7 @@ namespace Ryujinx.Ava.Common
             try
             {
                 using HttpClient http = new() { Timeout = TimeSpan.FromSeconds(15) };
+                http.DefaultRequestHeaders.Accept.Add(new MediaTypeWithQualityHeaderValue("application/json"));
                 using FormUrlEncodedContent form = new(new Dictionary<string, string>
                 {
                     ["grant_type"] = "authorization_code",
@@ -1219,7 +1249,7 @@ namespace Ryujinx.Ava.Common
                 string json = await resp.Content.ReadAsStringAsync();
                 if (!resp.IsSuccessStatusCode)
                 {
-                    return (false, "Échec de l'échange du code d'autorisation.");
+                    return (false, ReadOAuthError(json) ?? "Échec de l'échange du code d'autorisation.");
                 }
 
                 using JsonDocument doc = JsonDocument.Parse(json);
@@ -1240,6 +1270,74 @@ namespace Ryujinx.Ava.Common
             {
                 return (false, ex.Message);
             }
+        }
+
+        // Dev/test override for the OAuth client_id (public value, not a secret):
+        // lets an unbaked build log in with an app registered on
+        // https://nextendo.network/developers. Official releases use the baked id.
+        private const string OAuthClientIdEnvVar = "NEXTENDO_CLIENT_ID";
+
+        private static string ResolveOAuthClientId()
+        {
+            string env = (Environment.GetEnvironmentVariable(OAuthClientIdEnvVar) ?? "").Trim().Trim('"', '\'');
+            if (!string.IsNullOrEmpty(env))
+            {
+                return env;
+            }
+
+            return NextendoAppSecrets.AppToken; // empty in unbaked dev builds
+        }
+
+        // GETs the authorize URL before opening the browser. Returns null when the flow
+        // may proceed (login page / redirect), or the server's refusal message when it
+        // definitively says no (e.g. unknown client_id → HTTP 403 + {"error": ...}).
+        // Network failures return null: offline is inconclusive, let the browser show it.
+        private static async Task<string> CheckAuthorizeReachableAsync(string authorizeUrl)
+        {
+            try
+            {
+                using HttpClient http = new() { Timeout = TimeSpan.FromSeconds(10) };
+                using HttpResponseMessage resp = await http.GetAsync(authorizeUrl);
+                if ((int)resp.StatusCode < 400)
+                {
+                    return null;
+                }
+
+                string body = await resp.Content.ReadAsStringAsync();
+                return ReadOAuthError(body) ?? $"Le serveur a refusé la demande d'autorisation (HTTP {(int)resp.StatusCode}).";
+            }
+            catch
+            {
+                return null;
+            }
+        }
+
+        // Best-effort extraction of a server-provided OAuth error message.
+        private static string ReadOAuthError(string json)
+        {
+            try
+            {
+                using JsonDocument doc = JsonDocument.Parse(json);
+                JsonElement root = doc.RootElement;
+                if (root.TryGetProperty("error_description", out JsonElement desc) && desc.GetString() is { Length: > 0 } descText)
+                {
+                    return descText;
+                }
+                if (root.TryGetProperty("error", out JsonElement err) && err.GetString() is { Length: > 0 } errText)
+                {
+                    return errText;
+                }
+                if (root.TryGetProperty("message", out JsonElement msg) && msg.GetString() is { Length: > 0 } msgText)
+                {
+                    return msgText;
+                }
+            }
+            catch
+            {
+                // Not JSON (login HTML page, proxy block page, ...): no error to report.
+            }
+
+            return null;
         }
 
         // Read just the HTTP request line's target from the loopback callback, i.e. the
