@@ -1,0 +1,362 @@
+<UserControl
+    x:Class="Ryujinx.Ava.UI.Views.Console.ConsoleLibraryView"
+    xmlns="https://github.com/avaloniaui"
+    xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+    xmlns:console="clr-namespace:Ryujinx.Ava.UI.Views.Console"
+    xmlns:controls="clr-namespace:Ryujinx.Ava.UI.Controls"
+    xmlns:d="http://schemas.microsoft.com/expression/blend/2008"
+    xmlns:ext="clr-namespace:Ryujinx.Ava.Common.Markup"
+    xmlns:helpers="clr-namespace:Ryujinx.Ava.UI.Helpers"
+    xmlns:i="clr-namespace:Projektanker.Icons.Avalonia;assembly=Projektanker.Icons.Avalonia"
+    xmlns:mc="http://schemas.openxmlformats.org/markup-compatibility/2006"
+    xmlns:viewModels="clr-namespace:Ryujinx.Ava.UI.ViewModels"
+    d:DesignHeight="720"
+    d:DesignWidth="1280"
+    Focusable="True"
+    mc:Ignorable="d"
+    x:DataType="viewModels:MainWindowViewModel">
+    <UserControl.Styles>
+        <!-- Carousel items: selected card scales up with easing. -->
+        <Style Selector="ListBox.consoleCarousel ListBoxItem">
+            <Setter Property="Margin" Value="14,24" />
+            <Setter Property="Padding" Value="0" />
+            <Setter Property="Background" Value="Transparent" />
+            <Setter Property="HorizontalContentAlignment" Value="Center" />
+            <Setter Property="VerticalContentAlignment" Value="Center" />
+            <Setter Property="RenderTransformOrigin" Value="0.5,0.5" />
+            <Setter Property="RenderTransform" Value="scale(1)" />
+            <Setter Property="Transitions">
+                <Transitions>
+                    <TransformOperationsTransition Property="RenderTransform" Duration="0:0:0.18" />
+                </Transitions>
+            </Setter>
+        </Style>
+        <Style Selector="ListBox.consoleCarousel ListBoxItem:selected">
+            <Setter Property="RenderTransform" Value="scale(1.18)" />
+        </Style>
+        <!-- Grid items: subtler focus scale, still obvious with the ring. -->
+        <Style Selector="ListBox.consoleGrid ListBoxItem">
+            <Setter Property="Margin" Value="10" />
+            <Setter Property="Padding" Value="0" />
+            <Setter Property="Background" Value="Transparent" />
+            <Setter Property="RenderTransformOrigin" Value="0.5,0.5" />
+            <Setter Property="RenderTransform" Value="scale(1)" />
+            <Setter Property="Transitions">
+                <Transitions>
+                    <TransformOperationsTransition Property="RenderTransform" Duration="0:0:0.15" />
+                </Transitions>
+            </Setter>
+        </Style>
+        <Style Selector="ListBox.consoleGrid ListBoxItem:selected">
+            <Setter Property="RenderTransform" Value="scale(1.07)" />
+        </Style>
+        <Style Selector="Button.consoleCornerButton">
+            <Setter Property="Background" Value="#33000000" />
+            <Setter Property="BorderBrush" Value="#3A3A3A" />
+            <Setter Property="BorderThickness" Value="1" />
+            <Setter Property="CornerRadius" Value="24" />
+            <Setter Property="Padding" Value="0" />
+            <Setter Property="HorizontalAlignment" Value="Center" />
+            <Setter Property="VerticalAlignment" Value="Center" />
+            <Setter Property="Foreground" Value="{DynamicResource ConsoleTextPrimary}" />
+        </Style>
+    </UserControl.Styles>
+    <Grid RowDefinitions="Auto,*,Auto,Auto">
+        <!-- Blurred artwork background with dark fallback gradient. -->
+        <Panel Grid.RowSpan="4">
+            <Panel.Background>
+                <LinearGradientBrush StartPoint="0,0" EndPoint="0,1">
+                    <GradientStop Offset="0" Color="#1B1B22" />
+                    <GradientStop Offset="1" Color="#0B0B0E" />
+                </LinearGradientBrush>
+            </Panel.Background>
+            <Image
+                Name="BackgroundBack"
+                Stretch="UniformToFill"
+                RenderOptions.BitmapInterpolationMode="LowQuality"
+                IsHitTestVisible="False"
+                Opacity="0">
+                <Image.Effect>
+                    <BlurEffect Radius="80" />
+                </Image.Effect>
+            </Image>
+            <Image
+                Name="BackgroundFront"
+                Stretch="UniformToFill"
+                RenderOptions.BitmapInterpolationMode="LowQuality"
+                IsHitTestVisible="False"
+                Opacity="0">
+                <Image.Effect>
+                    <BlurEffect Radius="80" />
+                </Image.Effect>
+            </Image>
+            <Border Background="{DynamicResource ConsoleDimOverlay}" IsHitTestVisible="False" />
+        </Panel>
+        <!-- Top bar: view toggle, section tabs, clock. -->
+        <Grid
+            Grid.Row="0"
+            Margin="16,10,16,0"
+            ColumnDefinitions="Auto,*,Auto">
+            <Button
+                Grid.Column="0"
+                Classes="consoleCornerButton"
+                Width="48"
+                Height="48"
+                HorizontalAlignment="Left"
+                VerticalAlignment="Center"
+                Click="ViewToggle_OnClick"
+                ToolTip.Tip="{ext:Locale Console_ClassicView}">
+                <i:Icon Value="fa-solid fa-list" FontSize="20" />
+            </Button>
+            <console:SectionTabBar
+                Name="TabBar"
+                Grid.Column="1"
+                HorizontalAlignment="Center"
+                VerticalAlignment="Center" />
+            <TextBlock
+                Name="ClockTextBlock"
+                Grid.Column="2"
+                HorizontalAlignment="Right"
+                VerticalAlignment="Center"
+                FontSize="22"
+                FontWeight="SemiBold"
+                Text="--:--"
+                Foreground="{DynamicResource ConsoleTextPrimary}" />
+        </Grid>
+        <!-- Content: carousel for Home, dense grids for All / Favorites. -->
+        <Grid Grid.Row="1" Margin="0,8,0,0">
+            <ListBox
+                Name="HomeCarousel"
+                Padding="10"
+                HorizontalAlignment="Center"
+                VerticalAlignment="Center"
+                MaxWidth="{Binding CarouselViewportWidth}"
+                Background="Transparent"
+                Classes="consoleCarousel"
+                SelectionMode="Single"
+                ScrollViewer.HorizontalScrollBarVisibility="Hidden"
+                ScrollViewer.VerticalScrollBarVisibility="Disabled"
+                ContextFlyout="{Binding GridAppContextMenu}"
+                DoubleTapped="ContentList_DoubleTapped"
+                IsVisible="{Binding ConsoleLibrary.IsHomeSelected}"
+                ItemsSource="{Binding ConsoleLibrary.HomeApps}"
+                KeyDown="ContentList_KeyDown"
+                PointerWheelChanged="HomeCarousel_PointerWheelChanged"
+                SelectedItem="{Binding ConsoleLibrary.SelectedHomeApp, Mode=TwoWay}">
+                <ListBox.ItemsPanel>
+                    <ItemsPanelTemplate>
+                        <StackPanel Orientation="Horizontal" HorizontalAlignment="Center" />
+                    </ItemsPanelTemplate>
+                </ListBox.ItemsPanel>
+                <ListBox.ItemTemplate>
+                    <DataTemplate>
+                        <console:GameCard
+                            Width="{Binding $parent[UserControl].((viewModels:MainWindowViewModel)DataContext).CarouselItemSize}"
+                            Height="{Binding $parent[UserControl].((viewModels:MainWindowViewModel)DataContext).CarouselItemSize}"
+                            ShowTitle="False" />
+                    </DataTemplate>
+                </ListBox.ItemTemplate>
+            </ListBox>
+            <ListBox
+                Name="AllGrid"
+                Padding="12"
+                Background="Transparent"
+                Classes="consoleGrid"
+                SelectionMode="Single"
+                ScrollViewer.HorizontalScrollBarVisibility="Disabled"
+                ContextFlyout="{Binding GridAppContextMenu}"
+                DoubleTapped="ContentList_DoubleTapped"
+                IsVisible="{Binding ConsoleLibrary.IsAllSelected}"
+                ItemsSource="{Binding ConsoleLibrary.AllApps}"
+                KeyDown="ContentList_KeyDown"
+                SelectedItem="{Binding ConsoleLibrary.SelectedAllApp, Mode=TwoWay}">
+                <ListBox.ItemsPanel>
+                    <ItemsPanelTemplate>
+                        <WrapPanel HorizontalAlignment="Center" VerticalAlignment="Top" Orientation="Horizontal" />
+                    </ItemsPanelTemplate>
+                </ListBox.ItemsPanel>
+                <ListBox.ItemTemplate>
+                    <DataTemplate>
+                        <console:GameCard
+                            Width="{Binding $parent[UserControl].((viewModels:MainWindowViewModel)DataContext).GridItemSelectorSize}"
+                            Height="{Binding $parent[UserControl].((viewModels:MainWindowViewModel)DataContext).GridItemSelectorSize}"
+                            ShowTitle="True" />
+                    </DataTemplate>
+                </ListBox.ItemTemplate>
+            </ListBox>
+            <ListBox
+                Name="FavoritesGrid"
+                Padding="12"
+                Background="Transparent"
+                Classes="consoleGrid"
+                SelectionMode="Single"
+                ScrollViewer.HorizontalScrollBarVisibility="Disabled"
+                ContextFlyout="{Binding GridAppContextMenu}"
+                DoubleTapped="ContentList_DoubleTapped"
+                IsVisible="{Binding ConsoleLibrary.IsFavoritesSelected}"
+                ItemsSource="{Binding ConsoleLibrary.FavoriteApps}"
+                KeyDown="ContentList_KeyDown"
+                SelectedItem="{Binding ConsoleLibrary.SelectedFavoritesApp, Mode=TwoWay}">
+                <ListBox.ItemsPanel>
+                    <ItemsPanelTemplate>
+                        <WrapPanel HorizontalAlignment="Center" VerticalAlignment="Top" Orientation="Horizontal" />
+                    </ItemsPanelTemplate>
+                </ListBox.ItemsPanel>
+                <ListBox.ItemTemplate>
+                    <DataTemplate>
+                        <console:GameCard
+                            Width="{Binding $parent[UserControl].((viewModels:MainWindowViewModel)DataContext).GridItemSelectorSize}"
+                            Height="{Binding $parent[UserControl].((viewModels:MainWindowViewModel)DataContext).GridItemSelectorSize}"
+                            ShowTitle="True" />
+                    </DataTemplate>
+                </ListBox.ItemTemplate>
+            </ListBox>
+            <!-- Empty states -->
+            <StackPanel
+                Name="EmptyLibraryPanel"
+                HorizontalAlignment="Center"
+                VerticalAlignment="Center"
+                Spacing="10"
+                IsVisible="False">
+                <TextBlock
+                    HorizontalAlignment="Center"
+                    FontSize="20"
+                    FontWeight="Bold"
+                    Text="{ext:Locale Console_EmptyTitle}"
+                    Foreground="{DynamicResource ConsoleTextPrimary}" />
+                <TextBlock
+                    Name="EmptyLibraryBody"
+                    HorizontalAlignment="Center"
+                    Text="{ext:Locale Console_EmptyBody}"
+                    TextAlignment="Center"
+                    Foreground="{DynamicResource ConsoleTextSecondary}" />
+                <Button
+                    HorizontalAlignment="Center"
+                    Padding="18,8"
+                    CornerRadius="{DynamicResource ConsolePillRadius}"
+                    Click="AddGameDirectory_OnClick"
+                    Content="{ext:Locale Console_AddGameDirectory}" />
+            </StackPanel>
+            <StackPanel
+                Name="EmptyFavoritesPanel"
+                HorizontalAlignment="Center"
+                VerticalAlignment="Center"
+                Spacing="10"
+                IsVisible="False">
+                <TextBlock
+                    HorizontalAlignment="Center"
+                    FontSize="20"
+                    FontWeight="Bold"
+                    Text="{ext:Locale Console_EmptyTitle}"
+                    Foreground="{DynamicResource ConsoleTextPrimary}" />
+                <TextBlock
+                    HorizontalAlignment="Center"
+                    Text="{ext:Locale Console_EmptyFavoritesBody}"
+                    TextAlignment="Center"
+                    Foreground="{DynamicResource ConsoleTextSecondary}" />
+            </StackPanel>
+        </Grid>
+        <!-- Selected game details -->
+        <console:GameDetailsPanel
+            Grid.Row="2"
+            Margin="0,4,0,6"
+            HorizontalAlignment="Center" />
+        <!-- Bottom bar: settings, hints, options, rescan. -->
+        <Grid
+            Grid.Row="3"
+            Margin="16,0,16,14"
+            ColumnDefinitions="Auto,*,Auto">
+            <Button
+                Grid.Column="0"
+                Name="SettingsCornerButton"
+                Classes="consoleCornerButton"
+                Width="48"
+                Height="48"
+                Click="SettingsButton_OnClick"
+                ToolTip.Tip="{ext:Locale Console_Settings}">
+                <i:Icon Value="fa-solid fa-gear" FontSize="20" />
+            </Button>
+            <console:ButtonHintBar
+                Name="HintBar"
+                Grid.Column="1"
+                HorizontalAlignment="Center"
+                VerticalAlignment="Center" />
+            <StackPanel
+                Grid.Column="2"
+                Orientation="Horizontal"
+                Spacing="10">
+                <Button
+                    Name="OptionsCornerButton"
+                    Classes="consoleCornerButton"
+                    Width="48"
+                    Height="48"
+                    Click="OptionsButton_OnClick"
+                    ToolTip.Tip="{ext:Locale Console_OptionsTitle}">
+                    <i:Icon Value="fa-solid fa-sliders" FontSize="20" />
+                </Button>
+                <Button
+                    Name="RescanCornerButton"
+                    Classes="consoleCornerButton"
+                    Width="48"
+                    Height="48"
+                    Click="RescanButton_OnClick"
+                    ToolTip.Tip="{ext:Locale Console_Rescan}">
+                    <i:Icon Value="fa-solid fa-rotate" FontSize="20" />
+                </Button>
+            </StackPanel>
+        </Grid>
+        <!-- Options overlay: existing sort/filter/search, console-styled. -->
+        <Border
+            Name="OptionsOverlay"
+            Grid.RowSpan="4"
+            HorizontalAlignment="Center"
+            VerticalAlignment="Center"
+            MinWidth="320"
+            Padding="20"
+            Background="#F2141418"
+            BorderBrush="{DynamicResource ConsoleCardBorder}"
+            BorderThickness="1"
+            CornerRadius="16"
+            IsVisible="False">
+            <StackPanel Spacing="12">
+                <TextBlock
+                    FontSize="16"
+                    FontWeight="Bold"
+                    Text="{ext:Locale Console_OptionsTitle}"
+                    Foreground="{DynamicResource ConsoleTextPrimary}" />
+                <TextBox
+                    Name="ConsoleSearchBox"
+                    Watermark="{ext:Locale MenuSearch}"
+                    Text="{Binding SearchText}"
+                    KeyUp="ConsoleSearchBox_OnKeyUp" />
+                <TextBlock
+                    Text="{ext:Locale Common_Sort_NameLabel}"
+                    Foreground="{DynamicResource ConsoleTextSecondary}" />
+                <StackPanel Name="SortOptionsPanel" Spacing="2">
+                    <RadioButton Checked="SortOption_Checked" Content="{ext:Locale CommonFavorite}" GroupName="ConsoleSort" Tag="Favorite" />
+                    <RadioButton Checked="SortOption_Checked" Content="{ext:Locale Common_Sort_NameLabel}" GroupName="ConsoleSort" Tag="Title" />
+                    <RadioButton Checked="SortOption_Checked" Content="{ext:Locale DlcManagerTableHeadingTitleIdLabel}" GroupName="ConsoleSort" Tag="TitleId" />
+                    <RadioButton Checked="SortOption_Checked" Content="{ext:Locale GameListSortDeveloper}" GroupName="ConsoleSort" Tag="Developer" />
+                    <RadioButton Checked="SortOption_Checked" Content="{ext:Locale GameListSortTimePlayed}" GroupName="ConsoleSort" Tag="TotalTimePlayed" />
+                    <RadioButton Checked="SortOption_Checked" Content="{ext:Locale GameListSortLastPlayed}" GroupName="ConsoleSort" Tag="LastPlayed" />
+                    <RadioButton Checked="SortOption_Checked" Content="{ext:Locale GameListSortFileExtension}" GroupName="ConsoleSort" Tag="FileType" />
+                    <RadioButton Checked="SortOption_Checked" Content="{ext:Locale GameListSortFileSize}" GroupName="ConsoleSort" Tag="FileSize" />
+                    <RadioButton Checked="SortOption_Checked" Content="{ext:Locale GameListSortPath}" GroupName="ConsoleSort" Tag="Path" />
+                </StackPanel>
+                <StackPanel Name="SortOrderPanel" Orientation="Horizontal" Spacing="12">
+                    <RadioButton Checked="SortOrder_Checked" Content="{ext:Locale Common_Sort_OrderAscending}" GroupName="ConsoleOrder" Tag="Ascending" />
+                    <RadioButton Checked="SortOrder_Checked" Content="{ext:Locale Common_Sort_OrderDescending}" GroupName="ConsoleOrder" Tag="Descending" />
+                </StackPanel>
+                <CheckBox
+                    Content="{ext:Locale Console_ReduceAnimations}"
+                    IsChecked="{Binding ConsoleReduceAnimations, Mode=TwoWay}" />
+                <Button
+                    HorizontalAlignment="Right"
+                    Padding="18,6"
+                    CornerRadius="10"
+                    Click="OptionsButton_OnClick"
+                    Content="{ext:Locale InputDialogOk}" />
+            </StackPanel>
+        </Border>
+    </Grid>
+</UserControl>
