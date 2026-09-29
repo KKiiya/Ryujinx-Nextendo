@@ -72,20 +72,13 @@
                         Height="72"
                         ClipToBounds="True"
                         CornerRadius="36"
-                        BorderBrush="#4A4A4A"
-                        BorderThickness="1.5">
+                        BorderThickness="0">
                         <Grid>
                             <Image
                                 Name="ProfileAvatarImage"
                                 Width="72"
                                 Height="72"
                                 Stretch="UniformToFill" />
-                            <Ellipse
-                                IsHitTestVisible="False"
-                                Width="72"
-                                Height="72"
-                                Stroke="#4A4A4A"
-                                StrokeThickness="1.5" />
                         </Grid>
                     </Border>
                     <Border
