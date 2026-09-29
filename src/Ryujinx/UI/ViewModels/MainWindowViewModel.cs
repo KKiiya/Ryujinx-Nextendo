@@ -814,6 +814,7 @@ namespace Ryujinx.Ava.UI.ViewModels
                 OnPropertyChanged(nameof(IsGrid));
                 OnPropertyChanged(nameof(IsList));
                 OnPropertyChanged(nameof(IsCarousel));
+                NotifyLibraryPresentation();
 
                 ConfigurationState.Instance.ToFileFormat().SaveConfig(Program.ConfigurationPath);
             }
@@ -1646,6 +1647,7 @@ namespace Ryujinx.Ava.UI.ViewModels
             OnPropertyChanged(nameof(IsCarousel));
             OnPropertyChanged(nameof(IsList));
             OnPropertyChanged(nameof(IsGrid));
+            NotifyLibraryPresentation();
         }
 
         public void SetListMode()

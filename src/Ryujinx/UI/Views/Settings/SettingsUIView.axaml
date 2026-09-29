@@ -171,6 +171,32 @@
                             </CheckBox>
                             <TextBlock Classes="globalConfigMarker" IsVisible="{Binding IsGameTitleNotNull}" />
                         </StackPanel>
+                        <!-- Console library presentation + reduced animations -->
+                        <StackPanel
+                            IsEnabled="{Binding !IsGameTitleNotNull}"
+                            Opacity="{Binding PanelOpacity}"
+                            Margin="0, 15, 0, 0"
+                            Orientation="Horizontal">
+                            <TextBlock VerticalAlignment="Center"
+                                       Text="{ext:Locale Console_ConsoleView}"
+                                       Width="150" />
+                            <ComboBox SelectedIndex="{Binding LibraryPresentationIndex}"
+                                      HorizontalContentAlignment="Left"
+                                      MinWidth="160">
+                                <ComboBoxItem
+                                    Content="{ext:Locale Console_ConsoleView}" />
+                                <ComboBoxItem
+                                    Content="{ext:Locale Console_ClassicView}" />
+                            </ComboBox>
+                            <TextBlock Classes="globalConfigMarker" IsVisible="{Binding IsGameTitleNotNull}" />
+                        </StackPanel>
+                        <StackPanel
+                            Margin="0, 10, 0, 0"
+                            Orientation="Horizontal">
+                            <CheckBox IsChecked="{Binding ConsoleReduceAnimations}">
+                                <TextBlock Text="{ext:Locale Console_ReduceAnimations}" />
+                            </CheckBox>
+                        </StackPanel>
                     </StackPanel>
                 </StackPanel>
                 <Border Grid.Column="1"

@@ -165,6 +165,33 @@ namespace Ryujinx.Ava.UI.ViewModels
             }
         }
 
+        // Console library presentation: 0 = Console (HOME-style), 1 = Classic.
+        public int LibraryPresentationIndex
+        {
+            get => ConfigurationState.Instance.UI.LibraryPresentation;
+            set
+            {
+                if (ConfigurationState.Instance.UI.LibraryPresentation.Value != value)
+                {
+                    ConfigurationState.Instance.UI.LibraryPresentation.Value = value;
+                    OnPropertyChanged();
+                }
+            }
+        }
+
+        public bool ConsoleReduceAnimations
+        {
+            get => ConfigurationState.Instance.UI.ConsoleReduceAnimations;
+            set
+            {
+                if (ConfigurationState.Instance.UI.ConsoleReduceAnimations.Value != value)
+                {
+                    ConfigurationState.Instance.UI.ConsoleReduceAnimations.Value = value;
+                    OnPropertyChanged();
+                }
+            }
+        }
+
         public int GraphicsBackendMultithreadingIndex
         {
             get;

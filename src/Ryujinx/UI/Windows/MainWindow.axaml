@@ -10,6 +10,7 @@
     xmlns:controls="clr-namespace:Ryujinx.Ava.UI.Controls"
     xmlns:main="clr-namespace:Ryujinx.Ava.UI.Views.Main"
     xmlns:viewsMisc="clr-namespace:Ryujinx.Ava.UI.Views.Misc"
+    xmlns:console="clr-namespace:Ryujinx.Ava.UI.Views.Console"
     Cursor="{Binding Cursor}"
     Title="{Binding Title}"
     WindowState="{Binding WindowState}"
@@ -83,7 +84,8 @@
                       RowDefinitions="Auto,*">
                     <main:MainViewControls
                         Name="ViewControls"
-                        Grid.Row="0"/>
+                        Grid.Row="0"
+                        IsVisible="{Binding IsClassicView}"/>
                     <viewsMisc:ApplicationListView
                         x:Name="ApplicationList"
                         Grid.Row="1"
@@ -91,7 +93,7 @@
                         VerticalAlignment="Stretch"
                         HorizontalContentAlignment="Stretch"
                         VerticalContentAlignment="Stretch"
-                        IsVisible="{Binding IsList}" />
+                        IsVisible="{Binding IsListActive}" />
                     <viewsMisc:ApplicationGridView
                         x:Name="ApplicationGrid"
                         Grid.Row="1"
@@ -99,7 +101,7 @@
                         VerticalAlignment="Stretch"
                         HorizontalContentAlignment="Stretch"
                         VerticalContentAlignment="Stretch"
-                        IsVisible="{Binding IsGrid}" />
+                        IsVisible="{Binding IsGridActive}" />
                     <viewsMisc:ApplicationCarouselView
                         x:Name="ApplicationCarousel"
                         Grid.Row="1"
@@ -107,7 +109,16 @@
                         VerticalAlignment="Stretch"
                         HorizontalContentAlignment="Stretch"
                         VerticalContentAlignment="Stretch"
-                        IsVisible="{Binding IsCarousel}" />
+                        IsVisible="{Binding IsCarouselActive}" />
+                    <console:ConsoleLibraryView
+                        x:Name="ConsoleLibrary"
+                        Grid.Row="0"
+                        Grid.RowSpan="2"
+                        HorizontalAlignment="Stretch"
+                        VerticalAlignment="Stretch"
+                        HorizontalContentAlignment="Stretch"
+                        VerticalContentAlignment="Stretch"
+                        IsVisible="{Binding IsConsoleView}" />
                 </Grid>
             </ContentControl>
             <Grid

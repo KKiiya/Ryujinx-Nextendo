@@ -104,6 +104,7 @@ namespace Ryujinx.Ava.UI.Windows
             ApplicationList.DataContext = DataContext;
             ApplicationGrid.DataContext = DataContext;
             ApplicationCarousel.DataContext = DataContext;
+            ConsoleLibrary.DataContext = DataContext;
 
             SetWindowSizePosition();
 
@@ -533,10 +534,12 @@ namespace Ryujinx.Ava.UI.Windows
             StatusBarView.VolumeStatus.Click += VolumeStatus_CheckedChanged;
 
             ApplicationGrid.DataContext = ApplicationList.DataContext = ApplicationCarousel.DataContext = ViewModel;
+            ConsoleLibrary.DataContext = ViewModel;
 
             ApplicationGrid.ApplicationOpened += Application_Opened;
             ApplicationList.ApplicationOpened += Application_Opened;
             ApplicationCarousel.ApplicationOpened += Application_Opened;
+            ConsoleLibrary.ApplicationOpened += Application_Opened;
         }
 
         private void SetWindowSizePosition()
