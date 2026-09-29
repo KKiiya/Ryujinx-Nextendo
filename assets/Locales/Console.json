@@ -1,0 +1,137 @@
+{
+  "Locales": [
+    {
+      "ID": "Home",
+      "Translations": {
+        "en_US": "Home",
+        "es_ES": "Inicio"
+      }
+    },
+    {
+      "ID": "AllSoftware",
+      "Translations": {
+        "en_US": "All Software",
+        "es_ES": "Todos los juegos"
+      }
+    },
+    {
+      "ID": "Favorites",
+      "Translations": {
+        "en_US": "Favorites",
+        "es_ES": "Favoritos"
+      }
+    },
+    {
+      "ID": "EmptyTitle",
+      "Translations": {
+        "en_US": "No games found",
+        "es_ES": "No se encontraron juegos"
+      }
+    },
+    {
+      "ID": "EmptyBody",
+      "Translations": {
+        "en_US": "Add a game directory to start building your library.",
+        "es_ES": "Añade una carpeta de juegos para empezar a crear tu biblioteca."
+      }
+    },
+    {
+      "ID": "EmptyFavoritesBody",
+      "Translations": {
+        "en_US": "Mark a game as favorite to see it here.",
+        "es_ES": "Marca un juego como favorito para verlo aquí."
+      }
+    },
+    {
+      "ID": "AddGameDirectory",
+      "Translations": {
+        "en_US": "Add game directory",
+        "es_ES": "Añadir carpeta de juegos"
+      }
+    },
+    {
+      "ID": "HintLaunch",
+      "Translations": {
+        "en_US": "Launch",
+        "es_ES": "Iniciar"
+      }
+    },
+    {
+      "ID": "HintBack",
+      "Translations": {
+        "en_US": "Back",
+        "es_ES": "Atrás"
+      }
+    },
+    {
+      "ID": "HintOptions",
+      "Translations": {
+        "en_US": "Options",
+        "es_ES": "Opciones"
+      }
+    },
+    {
+      "ID": "HintSort",
+      "Translations": {
+        "en_US": "Sort",
+        "es_ES": "Ordenar"
+      }
+    },
+    {
+      "ID": "HintFavorite",
+      "Translations": {
+        "en_US": "Favorite",
+        "es_ES": "Favorito"
+      }
+    },
+    {
+      "ID": "OptionsTitle",
+      "Translations": {
+        "en_US": "Library options",
+        "es_ES": "Opciones de la biblioteca"
+      }
+    },
+    {
+      "ID": "SortOrder",
+      "Translations": {
+        "en_US": "Order",
+        "es_ES": "Orden"
+      }
+    },
+    {
+      "ID": "ReduceAnimations",
+      "Translations": {
+        "en_US": "Reduce animations",
+        "es_ES": "Reducir animaciones"
+      }
+    },
+    {
+      "ID": "ConsoleView",
+      "Translations": {
+        "en_US": "Console view",
+        "es_ES": "Vista consola"
+      }
+    },
+    {
+      "ID": "ClassicView",
+      "Translations": {
+        "en_US": "Classic view",
+        "es_ES": "Vista clásica"
+      }
+    },
+    {
+      "ID": "Rescan",
+      "Translations": {
+        "en_US": "Rescan",
+        "es_ES": "Reescanear"
+      }
+    },
+    {
+      "ID": "Settings",
+      "Translations": {
+        "en_US": "Settings",
+        "es_ES": "Ajustes"
+      }
+    }
+  ]
+}
