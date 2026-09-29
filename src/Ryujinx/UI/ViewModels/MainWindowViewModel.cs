@@ -246,8 +246,8 @@ namespace Ryujinx.Ava.UI.ViewModels
             Applications.ToObservableChangeSet()
                 .Filter(Filter)
                 .Sort(GetComparer())
-                .OnItemAdded(_ => OnPropertyChanged(nameof(AppsObservableList)))
-                .OnItemRemoved(_ => OnPropertyChanged(nameof(AppsObservableList)))
+                .OnItemAdded(_ => { OnPropertyChanged(nameof(AppsObservableList)); RefreshConsoleLibrary(); })
+                .OnItemRemoved(_ => { OnPropertyChanged(nameof(AppsObservableList)); RefreshConsoleLibrary(); })
                 .Bind(out _appsObservableList)
                 .Subscribe();
 
@@ -278,6 +278,8 @@ namespace Ryujinx.Ava.UI.ViewModels
             }
 
             ToggleSkylanderCommand = new RelayCommand(ExecuteToggleSkylander);
+
+            EnsureConsoleLibrary();
         }
 
         ~MainWindowViewModel()
@@ -1077,6 +1079,8 @@ namespace Ryujinx.Ava.UI.ViewModels
                 .AsObservableList();
 
             CarouselAppsObservableList = carouselApps;
+
+            RefreshConsoleLibrary();
         }
 
         private bool Filter(object arg)
