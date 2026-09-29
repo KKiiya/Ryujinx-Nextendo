@@ -1,0 +1,32 @@
+<UserControl
+    x:Class="Ryujinx.Ava.UI.Views.Console.GameDetailsPanel"
+    xmlns="https://github.com/avaloniaui"
+    xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+    xmlns:d="http://schemas.microsoft.com/expression/blend/2008"
+    xmlns:mc="http://schemas.openxmlformats.org/markup-compatibility/2006"
+    xmlns:viewModels="clr-namespace:Ryujinx.Ava.UI.ViewModels"
+    mc:Ignorable="d"
+    x:DataType="viewModels:MainWindowViewModel">
+    <StackPanel
+        HorizontalAlignment="Center"
+        Orientation="Vertical"
+        Spacing="4">
+        <TextBlock
+            Name="TitleText"
+            HorizontalAlignment="Center"
+            MaxWidth="700"
+            FontSize="22"
+            FontWeight="Bold"
+            TextAlignment="Center"
+            TextTrimming="CharacterEllipsis"
+            Foreground="{DynamicResource ConsoleTextPrimary}" />
+        <TextBlock
+            Name="MetaText"
+            HorizontalAlignment="Center"
+            MaxWidth="760"
+            FontSize="13"
+            TextAlignment="Center"
+            TextTrimming="CharacterEllipsis"
+            Foreground="{DynamicResource ConsoleTextSecondary}" />
+    </StackPanel>
+</UserControl>

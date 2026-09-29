@@ -1,0 +1,22 @@
+<ResourceDictionary
+    xmlns="https://github.com/avaloniaui"
+    xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml">
+    <!-- Central palette for the Console (HOME-style) library view.
+         The Classic List/Grid views keep using the theme resources. -->
+    <SolidColorBrush x:Key="ConsoleBackground">#FF101014</SolidColorBrush>
+    <SolidColorBrush x:Key="ConsoleBackgroundFallbackTop">#FF1B1B22</SolidColorBrush>
+    <SolidColorBrush x:Key="ConsoleBackgroundFallbackBottom">#FF0B0B0E</SolidColorBrush>
+    <SolidColorBrush x:Key="ConsoleCardBackground">#FF1E1E26</SolidColorBrush>
+    <SolidColorBrush x:Key="ConsolePillBackground">#CC23232C</SolidColorBrush>
+    <SolidColorBrush x:Key="ConsolePillSelectedBackground">#FF3EE8C8</SolidColorBrush>
+    <SolidColorBrush x:Key="ConsoleAccent">#FF3EE8C8</SolidColorBrush>
+    <SolidColorBrush x:Key="ConsoleTextPrimary">#FFFFFFFF</SolidColorBrush>
+    <SolidColorBrush x:Key="ConsoleTextSecondary">#FFB4B4BC</SolidColorBrush>
+    <SolidColorBrush x:Key="ConsoleTextOnAccent">#FF0B0D12</SolidColorBrush>
+    <SolidColorBrush x:Key="ConsoleFocusRing">#FFFFFFFF</SolidColorBrush>
+    <SolidColorBrush x:Key="ConsoleDimOverlay">#99101213</SolidColorBrush>
+    <SolidColorBrush x:Key="ConsoleCardBorder">#FF3A3A44</SolidColorBrush>
+    <SolidColorBrush x:Key="ConsoleHintKeyBackground">#FF2A2A33</SolidColorBrush>
+    <CornerRadius x:Key="ConsoleCardRadius">12</CornerRadius>
+    <CornerRadius x:Key="ConsolePillRadius">18</CornerRadius>
+</ResourceDictionary>

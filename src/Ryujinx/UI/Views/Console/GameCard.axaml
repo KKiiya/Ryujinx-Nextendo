@@ -1,0 +1,68 @@
+<UserControl
+    x:Class="Ryujinx.Ava.UI.Views.Console.GameCard"
+    xmlns="https://github.com/avaloniaui"
+    xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+    xmlns:d="http://schemas.microsoft.com/expression/blend/2008"
+    xmlns:helpers="clr-namespace:Ryujinx.Ava.UI.Helpers"
+    xmlns:local="clr-namespace:Ryujinx.Ava.UI.Views.Console"
+    xmlns:mc="http://schemas.openxmlformats.org/markup-compatibility/2006"
+    xmlns:systems="clr-namespace:Ryujinx.Ava.Systems.AppLibrary"
+    xmlns:ui="clr-namespace:FluentAvalonia.UI.Controls;assembly=FluentAvalonia"
+    mc:Ignorable="d"
+    x:DataType="systems:ApplicationData">
+    <Grid>
+        <Border
+            Background="{DynamicResource ConsoleCardBackground}"
+            BorderBrush="{DynamicResource ConsoleCardBorder}"
+            BorderThickness="1"
+            ClipToBounds="True"
+            CornerRadius="{DynamicResource ConsoleCardRadius}">
+            <Grid>
+                <Image
+                    Name="CoverImage"
+                    HorizontalAlignment="Center"
+                    VerticalAlignment="Center"
+                    RenderOptions.BitmapInterpolationMode="HighQuality"
+                    Stretch="Uniform"
+                    Source="{Binding Icon, Converter={x:Static helpers:BitmapArrayValueConverter.Instance}}" />
+                <!-- Placeholder when the game has no artwork: title initial on a dark tile. -->
+                <Grid Name="PlaceholderGrid" IsVisible="False">
+                    <TextBlock
+                        Name="PlaceholderText"
+                        HorizontalAlignment="Center"
+                        VerticalAlignment="Center"
+                        FontSize="64"
+                        FontWeight="Bold"
+                        Foreground="{DynamicResource ConsoleTextSecondary}" />
+                </Grid>
+                <TextBlock
+                    Margin="8"
+                    HorizontalAlignment="Center"
+                    VerticalAlignment="Bottom"
+                    MaxWidth="220"
+                    FontSize="12"
+                    Text="{Binding Name}"
+                    TextAlignment="Center"
+                    TextTrimming="CharacterEllipsis"
+                    TextWrapping="NoWrap"
+                    Foreground="{DynamicResource ConsoleTextSecondary}"
+                    IsVisible="{Binding $parent[local:GameCard].ShowTitle}" />
+            </Grid>
+        </Border>
+        <ui:SymbolIcon
+            Margin="6,6,0,0"
+            HorizontalAlignment="Left"
+            VerticalAlignment="Top"
+            FontSize="22"
+            Foreground="{DynamicResource FavoriteApplicationIconColor}"
+            IsVisible="{Binding Favorite}"
+            Symbol="StarFilled" />
+        <!-- Selection outline: focus is scale (parent style) + elevation + this ring. -->
+        <Border
+            IsHitTestVisible="False"
+            BorderBrush="{DynamicResource ConsoleFocusRing}"
+            BorderThickness="3"
+            CornerRadius="{DynamicResource ConsoleCardRadius}"
+            IsVisible="{Binding $parent[ListBoxItem].IsSelected}" />
+    </Grid>
+</UserControl>

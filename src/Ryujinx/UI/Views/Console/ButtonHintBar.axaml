@@ -1,0 +1,66 @@
+<UserControl
+    x:Class="Ryujinx.Ava.UI.Views.Console.ButtonHintBar"
+    xmlns="https://github.com/avaloniaui"
+    xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+    xmlns:d="http://schemas.microsoft.com/expression/blend/2008"
+    xmlns:ext="clr-namespace:Ryujinx.Ava.Common.Markup"
+    xmlns:local="clr-namespace:Ryujinx.Ava.UI.Views.Console"
+    xmlns:mc="http://schemas.openxmlformats.org/markup-compatibility/2006"
+    xmlns:viewModels="clr-namespace:Ryujinx.Ava.UI.ViewModels"
+    mc:Ignorable="d"
+    x:DataType="viewModels:MainWindowViewModel">
+    <UserControl.Styles>
+        <Style Selector="Border.hintKey">
+            <Setter Property="Background" Value="{DynamicResource ConsoleHintKeyBackground}" />
+            <Setter Property="CornerRadius" Value="6" />
+            <Setter Property="Padding" Value="7,2" />
+            <Setter Property="Margin" Value="0,0,6,0" />
+        </Style>
+    </UserControl.Styles>
+    <StackPanel Orientation="Horizontal" Spacing="16">
+        <!-- Keyboard hints -->
+        <StackPanel
+            Orientation="Horizontal"
+            Spacing="16"
+            IsVisible="{Binding !$parent[local:ButtonHintBar].GamepadHintsVisible}">
+            <StackPanel Orientation="Horizontal">
+                <Border Classes="hintKey"><TextBlock Text="Enter" FontSize="12" FontWeight="Bold" /></Border>
+                <TextBlock Text="{ext:Locale Console_HintLaunch}" FontSize="12" VerticalAlignment="Center" Foreground="{DynamicResource ConsoleTextSecondary}" />
+            </StackPanel>
+            <StackPanel Orientation="Horizontal">
+                <Border Classes="hintKey"><TextBlock Text="Esc" FontSize="12" FontWeight="Bold" /></Border>
+                <TextBlock Text="{ext:Locale Console_HintBack}" FontSize="12" VerticalAlignment="Center" Foreground="{DynamicResource ConsoleTextSecondary}" />
+            </StackPanel>
+            <StackPanel Orientation="Horizontal">
+                <Border Classes="hintKey"><TextBlock Text="S" FontSize="12" FontWeight="Bold" /></Border>
+                <TextBlock Text="{ext:Locale Console_HintSort}" FontSize="12" VerticalAlignment="Center" Foreground="{DynamicResource ConsoleTextSecondary}" />
+            </StackPanel>
+            <StackPanel Orientation="Horizontal">
+                <Border Classes="hintKey"><TextBlock Text="F" FontSize="12" FontWeight="Bold" /></Border>
+                <TextBlock Text="{ext:Locale Console_HintFavorite}" FontSize="12" VerticalAlignment="Center" Foreground="{DynamicResource ConsoleTextSecondary}" />
+            </StackPanel>
+        </StackPanel>
+        <!-- Gamepad hints -->
+        <StackPanel
+            Orientation="Horizontal"
+            Spacing="16"
+            IsVisible="{Binding $parent[local:ButtonHintBar].GamepadHintsVisible}">
+            <StackPanel Orientation="Horizontal">
+                <Border Classes="hintKey"><TextBlock Text="B" FontSize="12" FontWeight="Bold" /></Border>
+                <TextBlock Text="{ext:Locale Console_HintLaunch}" FontSize="12" VerticalAlignment="Center" Foreground="{DynamicResource ConsoleTextSecondary}" />
+            </StackPanel>
+            <StackPanel Orientation="Horizontal">
+                <Border Classes="hintKey"><TextBlock Text="A" FontSize="12" FontWeight="Bold" /></Border>
+                <TextBlock Text="{ext:Locale Console_HintBack}" FontSize="12" VerticalAlignment="Center" Foreground="{DynamicResource ConsoleTextSecondary}" />
+            </StackPanel>
+            <StackPanel Orientation="Horizontal">
+                <Border Classes="hintKey"><TextBlock Text="Y" FontSize="12" FontWeight="Bold" /></Border>
+                <TextBlock Text="{ext:Locale Console_HintOptions}" FontSize="12" VerticalAlignment="Center" Foreground="{DynamicResource ConsoleTextSecondary}" />
+            </StackPanel>
+            <StackPanel Orientation="Horizontal">
+                <Border Classes="hintKey"><TextBlock Text="X" FontSize="12" FontWeight="Bold" /></Border>
+                <TextBlock Text="{ext:Locale Console_HintSort}" FontSize="12" VerticalAlignment="Center" Foreground="{DynamicResource ConsoleTextSecondary}" />
+            </StackPanel>
+        </StackPanel>
+    </StackPanel>
+</UserControl>

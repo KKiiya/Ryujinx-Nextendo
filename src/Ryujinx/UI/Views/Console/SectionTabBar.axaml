@@ -1,0 +1,52 @@
+<UserControl
+    x:Class="Ryujinx.Ava.UI.Views.Console.SectionTabBar"
+    xmlns="https://github.com/avaloniaui"
+    xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+    xmlns:d="http://schemas.microsoft.com/expression/blend/2008"
+    xmlns:ext="clr-namespace:Ryujinx.Ava.Common.Markup"
+    xmlns:mc="http://schemas.openxmlformats.org/markup-compatibility/2006"
+    xmlns:viewModels="clr-namespace:Ryujinx.Ava.UI.ViewModels"
+    mc:Ignorable="d"
+    x:DataType="viewModels:MainWindowViewModel">
+    <Border
+        Padding="4"
+        HorizontalAlignment="Center"
+        Background="{DynamicResource ConsolePillBackground}"
+        CornerRadius="{DynamicResource ConsolePillRadius}">
+        <StackPanel Orientation="Horizontal" Spacing="4">
+            <Button
+                Name="HomeTab"
+                Padding="18,7"
+                CornerRadius="{DynamicResource ConsolePillRadius}"
+                Click="SectionTab_OnClick"
+                Tag="0"
+                ToolTip.Tip="{ext:Locale Console_Home}">
+                <TextBlock Text="{ext:Locale Console_Home}" FontWeight="SemiBold" />
+            </Button>
+            <Button
+                Name="AllTab"
+                Padding="18,7"
+                CornerRadius="{DynamicResource ConsolePillRadius}"
+                Click="SectionTab_OnClick"
+                Tag="1"
+                ToolTip.Tip="{ext:Locale Console_AllSoftware}">
+                <StackPanel Orientation="Horizontal" Spacing="6">
+                    <TextBlock Text="{ext:Locale Console_AllSoftware}" FontWeight="SemiBold" />
+                    <TextBlock Text="{Binding ConsoleLibrary.AllCount}" Foreground="{DynamicResource ConsoleTextSecondary}" />
+                </StackPanel>
+            </Button>
+            <Button
+                Name="FavoritesTab"
+                Padding="18,7"
+                CornerRadius="{DynamicResource ConsolePillRadius}"
+                Click="SectionTab_OnClick"
+                Tag="2"
+                ToolTip.Tip="{ext:Locale Console_Favorites}">
+                <StackPanel Orientation="Horizontal" Spacing="6">
+                    <TextBlock Text="{ext:Locale Console_Favorites}" FontWeight="SemiBold" />
+                    <TextBlock Text="{Binding ConsoleLibrary.FavoriteCount}" Foreground="{DynamicResource ConsoleTextSecondary}" />
+                </StackPanel>
+            </Button>
+        </StackPanel>
+    </Border>
+</UserControl>
