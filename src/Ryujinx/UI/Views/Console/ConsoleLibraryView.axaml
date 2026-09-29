@@ -93,14 +93,13 @@
             <Border Background="{DynamicResource ConsoleDimOverlay}" IsHitTestVisible="False" />
         </Panel>
         <!-- Top bar: view toggle, section tabs, clock. -->
-        <!-- Top bar: view toggle, section tabs, clock. -->
+        <!-- Top bar: view toggle, section tabs, clock. Single-cell overlay so the
+             tab bar centers on the screen (not on the space between the sides). -->
         <Grid
             Name="TopBar"
             Grid.Row="0"
-            Margin="16,10,16,0"
-            ColumnDefinitions="Auto,*,Auto">
+            Margin="16,10,16,0">
             <StackPanel
-                Grid.Column="0"
                 HorizontalAlignment="Left"
                 VerticalAlignment="Center"
                 Orientation="Horizontal"
@@ -149,12 +148,10 @@
             </StackPanel>
             <console:SectionTabBar
                 Name="TabBar"
-                Grid.Column="1"
                 HorizontalAlignment="Center"
                 VerticalAlignment="Center" />
             <TextBlock
                 Name="ClockTextBlock"
-                Grid.Column="2"
                 HorizontalAlignment="Right"
                 VerticalAlignment="Center"
                 FontSize="22"
@@ -300,30 +297,30 @@
             Grid.Row="2"
             Margin="0,4,0,6"
             HorizontalAlignment="Center" />
-        <!-- Bottom bar: settings, hints, options, rescan. -->
-        <!-- Bottom bar: settings, hints, options, rescan. -->
+        <!-- Bottom bar: settings, hints, options, rescan. Single-cell overlay so
+             the hints center on the screen. -->
         <Grid
             Name="BottomBar"
             Grid.Row="3"
-            Margin="16,0,16,14"
-            ColumnDefinitions="Auto,*,Auto">
+            Margin="16,0,16,14">
             <Button
-                Grid.Column="0"
                 Name="SettingsCornerButton"
                 Classes="consoleCornerButton"
                 Width="48"
                 Height="48"
+                HorizontalAlignment="Left"
+                VerticalAlignment="Center"
                 Click="SettingsButton_OnClick"
                 ToolTip.Tip="{ext:Locale Console_Settings}">
                 <i:Icon Value="fa-solid fa-gear" FontSize="20" />
             </Button>
             <console:ButtonHintBar
                 Name="HintBar"
-                Grid.Column="1"
                 HorizontalAlignment="Center"
                 VerticalAlignment="Center" />
             <StackPanel
-                Grid.Column="2"
+                HorizontalAlignment="Right"
+                VerticalAlignment="Center"
                 Orientation="Horizontal"
                 Spacing="10">
                 <Button
