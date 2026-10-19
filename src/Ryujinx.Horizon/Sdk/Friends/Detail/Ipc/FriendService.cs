@@ -1,4 +1,4 @@
-﻿using Ryujinx.Common.Configuration;
+using Ryujinx.Common.Configuration;
 using Ryujinx.Common.Logging;
 using Ryujinx.Common.Memory;
 using Ryujinx.Horizon.Common;
@@ -28,12 +28,83 @@ namespace Ryujinx.Horizon.Sdk.Friends.Detail.Ipc
             Os.SignalSystemEvent(ref _completionEvent); // TODO: Figure out where we are supposed to signal this.
         }
 
-        // [Nextendo] Splatoon 3 passe par NPLN, qui nomme chaque ami par son NSA. Gate explicite par
-        // titre : tout autre jeu (Mario Kart 8, Splatoon 2...) garde le comportement PID d'origine.
+        // NPLN games identify friends by NSA ID; NEX games retain their PID mapping.
         private const string Splatoon3TitleId = "0100c2500fc20000";
+        private const string WonderTitleId = "010015100b514000";
+
+        // Attente maximale de la liste au premier GetFriendList de Smash Bros. Ultimate apres son
+        // lancement (NextendoFriends.GetForSmashLaunch) : seule /api/friends compte (delai HTTP de
+        // 8 s), l'historique et la liaison partent en tache de fond.
+        private const int SmashListWaitMs = 8000;
 
         private static bool WantsNsaIds()
-            => string.Equals(NextendoFriends.CurrentTitleId, Splatoon3TitleId, StringComparison.OrdinalIgnoreCase);
+            => string.Equals(NextendoFriends.CurrentTitleId, Splatoon3TitleId, StringComparison.OrdinalIgnoreCase)
+                || string.Equals(NextendoFriends.CurrentTitleId, WonderTitleId, StringComparison.OrdinalIgnoreCase);
+
+        // True for the local profile the signed-in Nextendo account is bound to (every profile
+        // when none is recorded yet).
+        private static bool IsNextendoProfile(Uid userId)
+        {
+            string bound = NextendoAccount.ProfileUserId;
+
+            return string.IsNullOrEmpty(bound) || string.Equals(bound, userId.ToString(), StringComparison.OrdinalIgnoreCase);
+        }
+
+        // The friend record of SDK 20+ (0x220 bytes), as the HOME Menu's friend page reads it.
+        // Worked out by writing known bytes and watching the page: the head is the old record
+        // (user id, account id at 0x10, name at 0x18), the presence block sits at 0xE8 (its
+        // status at 0x100), and the flags close the record: 0x219 favourite, 0x21A new,
+        // 0x21F valid. Without the last one the tile stays an anonymous "?".
+        private const int FriendRecordV2Size = 0x220;
+
+        private static void WriteNextendoFriendV2(Span<byte> record, ulong netId, NextendoFriends.Entry entry)
+        {
+            PresenceStatus status = NextendoPresence(entry);
+
+            FriendImpl old = MakeNextendoFriend(netId, entry.Name, status, entry.AppField, sameApp: false);
+            ReadOnlySpan<byte> oldBytes = MemoryMarshal.AsBytes(MemoryMarshal.CreateReadOnlySpan(ref old, 1));
+
+            record.Clear();
+
+            oldBytes[..0x40].CopyTo(record);                 // ids and name
+            oldBytes.Slice(0x40, 0xE0).CopyTo(record[0xE8..]); // presence
+            record.Slice(0xE8 + 0x10, 8).Clear();
+
+            // "last online" of a friend who is offline: when the server last saw them
+            if (status == PresenceStatus.Offline && entry.LastSeen > 0)
+            {
+                BitConverter.TryWriteBytes(record.Slice(0xE8 + 0x10, 8), entry.LastSeen);
+            }
+            record[0x21F] = 1;
+
+            // The game being played, right before the presence (found by probing: the friend
+            // page asks the title card of the id at 0xE0 for its top line).
+            if (entry.Status > 0)
+            {
+                // online without a game (the HOME Menu of a console): the HOME Menu's card, not a
+                // card of id 0 ("?", "Loading failed")
+                BitConverter.TryWriteBytes(record.Slice(0xE0, 8), entry.AppId != 0 ? entry.AppId : NextendoGames.HomeMenuId);
+            }
+        }
+
+        // [Nextendo] The presence of a friend as the console tells it: playing only when in a game
+        // (its id, or the presence a game left), else just online. A friend on a console without
+        // a game was told "playing" a game of id 0: their page showed a "?" card, "Loading failed".
+        private static PresenceStatus NextendoPresence(NextendoFriends.Entry entry)
+        {
+            if (entry.Status <= 0)
+            {
+                return PresenceStatus.Offline;
+            }
+
+            // Online at all: "playing", always with a title (the game, the Nextendo App, or the HOME
+            // Menu, written at 0xE0 by WriteNextendoFriendV2), as the user's own presence is
+            // (GetUserPresenceViewV2). The page still says "Online" with the title's card; the
+            // overlay applet only reads the title of a friend "playing": with "Online" alone, a
+            // friend coming online without a game was announced "Online" instead of "HOME Menu".
+            // ("Playing" with a title of 0 was the "Loading failed" card: never written any more.)
+            return PresenceStatus.OnlinePlay;
+        }
 
         private static FriendImpl MakeNextendoFriend(ulong netId, string nick, PresenceStatus status, byte[] appField = null, bool sameApp = true)
         {
@@ -108,13 +179,13 @@ namespace Ryujinx.Horizon.Sdk.Friends.Detail.Ipc
 
             Logger.Stub?.PrintStub(LogClass.ServiceFriend, new { userId, offset, filter, pidPlaceholder, pid });
 
-            if (userId.IsNull)
+            if (userId.IsNull || offset < 0)
             {
                 return FriendResult.InvalidArgument;
             }
 
-            // [Nextendo] serve the player's real Nextendo friends (page 0 only).
-            if (offset == 0)
+            // NPLN games enumerate the full list using the requested offset.
+            if (offset == 0 || WantsNsaIds())
             {
                 bool wantNsa = WantsNsaIds();
 
@@ -124,7 +195,7 @@ namespace Ryujinx.Horizon.Sdk.Friends.Detail.Ipc
                 // bloquant (les bloquer casse leurs acquittements PRUDP).
                 IReadOnlyList<NextendoFriends.Entry> friends =
                     wantNsa ? NextendoFriends.GetWarm(2000) : NextendoFriends.Get();
-                int n = Math.Min(friends.Count, friendIds.Length);
+                int n = Math.Min(Math.Max(0, friends.Count - offset), friendIds.Length);
                 // QUEL identifiant ce jeu attend-il dans sa liste locale ? Mario Kart 8 (NEX)
                 // redemande ses amis PAR LE PID. Splatoon 3 (NPLN) les nomme par NSA : mesure,
                 // 125 appels sur 125 a UpdateFriendInfo portaient un id de 16 chiffres hexa alors
@@ -134,7 +205,8 @@ namespace Ryujinx.Horizon.Sdk.Friends.Detail.Ipc
                 // l'APPARTENANCE a la liste.
                 for (int i = 0; i < n; i++)
                 {
-                    ulong id = wantNsa && friends[i].Nsa != 0 ? friends[i].Nsa : friends[i].Pid;
+                    var entry = friends[offset + i];
+                    ulong id = wantNsa && entry.Nsa != 0 ? entry.Nsa : entry.Pid;
                     friendIds[i] = new NetworkServiceAccountId(id);
                 }
                 count = n;
@@ -159,30 +231,42 @@ namespace Ryujinx.Horizon.Sdk.Friends.Detail.Ipc
 
             Logger.Stub?.PrintStub(LogClass.ServiceFriend, new { userId, offset, filter, pidPlaceholder, pid });
 
-            if (userId.IsNull)
+            if (userId.IsNull || offset < 0)
             {
                 return FriendResult.InvalidArgument;
             }
 
-            // [Nextendo] serve the player's real Nextendo friends (page 0 only).
-            if (offset == 0)
+            // NPLN games enumerate the full list using the requested offset.
+            if (offset == 0 || WantsNsaIds())
             {
-                IReadOnlyList<NextendoFriends.Entry> friends = NextendoFriends.Get();
+                // Smash Bros. Ultimate ne lit cette liste qu'au lancement et sur FriendListUpdate,
+                // que NotificationService.GetEvent lui signale aussitot : deux appels a 0,6 s d'ecart,
+                // puis plus rien. Servie vide, il cherche les arenes d'amis avec zero identifiant pour
+                // toute la partie. Le premier appel du lancement attend donc la liste (8 s au plus),
+                // en relancant la lecture si celle du lancement a rate ; les suivants, comme les jeux
+                // NEX qui interrogent en boucle, gardent le chemin non bloquant. Cette boucle sert
+                // tous les clients friends (menu HOME compris) : jamais plus d'une attente par
+                // lancement (NextendoFriends.GetForSmashLaunch).
+                bool smash = NextendoFriends.ReadsListOnlyOnLaunch(NextendoFriends.CurrentTitleId) && !WantsNsaIds();
+                IReadOnlyList<NextendoFriends.Entry> friends = WantsNsaIds() ? NextendoFriends.GetWarm(2000)
+                    : smash ? NextendoFriends.GetForSmashLaunch(SmashListWaitMs)
+                    : NextendoFriends.Get();
                 bool wantNsa = WantsNsaIds();
-                int n = Math.Min(friends.Count, friendList.Length);
+                int n = Math.Min(Math.Max(0, friends.Count - offset), friendList.Length);
                 for (int i = 0; i < n; i++)
                 {
                     // Meme espace d'identifiants que GetFriendListIds, sinon Splatoon 3 recevrait
                     // ici des fiches estampillees d'un PID qu'il ne sait pas rapprocher de la liste
                     // que NPLN lui a donnee. Les autres jeux gardent le PID.
-                    ulong lid = wantNsa && friends[i].Nsa != 0 ? friends[i].Nsa : friends[i].Pid;
+                    var entry = friends[offset + i];
+                    ulong lid = wantNsa && entry.Nsa != 0 ? entry.Nsa : entry.Pid;
                     // Presence REELLE, comme le fait deja UpdateFriendInfo plus bas. Annoncer
                     // TOUT LE MONDE « en train de jouer a ce jeu » est un mensonge que le jeu
                     // peut verifier : il demande ensuite au serveur la session de chacun de ces
                     // pretendus joueurs, n'en retrouve aucune, et ecarte l'entree.
-                    PresenceStatus st = friends[i].Status > 0 ? PresenceStatus.OnlinePlay : PresenceStatus.Offline;
-                    friendList[i] = MakeNextendoFriend(lid, friends[i].Name, st, friends[i].AppField,
-                        sameApp: friends[i].Status > 0);
+                    PresenceStatus st = NextendoPresence(entry);
+                    friendList[i] = MakeNextendoFriend(lid, entry.Name, st, entry.AppField,
+                        sameApp: entry.Status > 0);
                 }
                 count = n;
 
@@ -196,7 +280,7 @@ namespace Ryujinx.Horizon.Sdk.Friends.Detail.Ipc
                 }
             }
 
-            Logger.Info?.Print(LogClass.ServiceFriend, $"[Nextendo] GetFriendList -> count={count}");
+            Logger.Info?.Print(LogClass.ServiceFriend, $"[Nextendo] GetFriendList -> offset={offset} count={count}");
 
             return Result.Success;
         }
@@ -220,7 +304,9 @@ namespace Ryujinx.Horizon.Sdk.Friends.Detail.Ipc
             // details the OUTPUT, one entry per requested id, in the SAME order — an entry we cannot
             // resolve stays IsValid=false rather than being skipped, otherwise the caller mis-pairs
             // the remaining ids with the wrong friends.
-            IReadOnlyList<NextendoFriends.Entry> known = NextendoFriends.Get();
+            // A list not loaded yet (the overlay of the system asks right after a friend comes online)
+            // is waited for a little.
+            IReadOnlyList<NextendoFriends.Entry> known = NextendoFriends.GetWarm(1500);
 
             for (int i = 0; i < friendIds.Length && i < info.Length; i++)
             {
@@ -240,8 +326,13 @@ namespace Ryujinx.Horizon.Sdk.Friends.Detail.Ipc
                         // Presence REELLE : un ami hors ligne doit apparaitre grise, pas « en train
                         // de jouer ». Annoncer OnlinePlay pour tout le monde pousse le jeu a proposer
                         // de rejoindre des parties qui n'existent pas.
-                        PresenceStatus st = e.Status > 0 ? PresenceStatus.OnlinePlay : PresenceStatus.Offline;
+                        PresenceStatus st = NextendoPresence(e);
                         info[i] = MakeNextendoFriend(wanted, e.Name, st, e.AppField, sameApp: e.Status > 0);
+
+                        // [Nextendo, HOME Menu work] As on a console, the record names the user of
+                        // the console whose friend it is: the overlay of the system checks it is a
+                        // user here before showing "online" (and asks the picture with it).
+                        info[i].UserId = userId;
 
                         break;
                     }
@@ -482,6 +573,42 @@ namespace Ryujinx.Horizon.Sdk.Friends.Detail.Ipc
             return Result.Success;
         }
 
+        // [Nextendo] ARMS's raw nn::friends presence status floors at Online (1) even while the
+        // player is hosting/joined to a private battle, and ARMS's own friends-list UI only ever
+        // consults its JoinMode app-field key when status==2 — so a real, joinable session still
+        // shows friends as greyed-out/non-joinable otherwise. Mirrors citron's IsArmsSessionActive
+        // fixup (friend.cpp): parse the null-delimited key/value app-field tokens and bump status
+        // to OnlinePlay whenever JoinMode indicates an active session.
+        private static bool IsArmsSessionActive(ReadOnlySpan<byte> appField)
+        {
+            int pos = 0;
+            while (pos < appField.Length)
+            {
+                int end = appField[pos..].IndexOf((byte)0);
+                int tokenEnd = end < 0 ? appField.Length : pos + end;
+                if (tokenEnd == pos)
+                {
+                    break;
+                }
+                string key = Encoding.ASCII.GetString(appField[pos..tokenEnd]);
+                pos = tokenEnd + 1;
+                if (pos >= appField.Length)
+                {
+                    break;
+                }
+                int valueEnd = appField[pos..].IndexOf((byte)0);
+                int valueTokenEnd = valueEnd < 0 ? appField.Length : pos + valueEnd;
+                string value = Encoding.ASCII.GetString(appField[pos..valueTokenEnd]);
+                pos = valueTokenEnd + 1;
+
+                if (key == "JoinMode")
+                {
+                    return value == "1" || value == "2" || value == "3" || value == "4";
+                }
+            }
+            return false;
+        }
+
         [CmifCommand(10610)]
         public Result UpdateUserPresence(
             Uid userId,
@@ -499,7 +626,16 @@ namespace Ryujinx.Horizon.Sdk.Friends.Detail.Ipc
                 Span<byte> af = MemoryMarshal.CreateSpan(
                     ref System.Runtime.CompilerServices.Unsafe.As<UserPresenceImpl.AppKeyValueStorageHolder, byte>(
                         ref up.AppKeyValueStorage), 0xC0);
-                NextendoFriends.PublishPresence((int)userPresence.Status, af.ToArray());
+
+                int status = (int)userPresence.Status;
+                if (IsArmsSessionActive(af))
+                {
+                    status = Math.Max(status, (int)PresenceStatus.OnlinePlay);
+                    Logger.Info?.Print(LogClass.ServiceFriend,
+                        "[Nextendo] ARMS JoinMode indicates an active session; bumping status to OnlinePlay (raw status floors at Online otherwise)");
+                }
+
+                NextendoFriends.PublishPresence(status, af.ToArray());
             }
             catch
             {
@@ -611,7 +747,23 @@ namespace Ryujinx.Horizon.Sdk.Friends.Detail.Ipc
         [CmifCommand(20100)]
         public Result GetFriendCount(out int count, Uid userId, SizedFriendFilter filter, ulong pidPlaceholder, [ClientProcessId] ulong pid)
         {
-            count = NextendoFriends.Get().Count; // [Nextendo] real friend count
+            // [Nextendo] The friends of the profile bound to the Nextendo account, and of no other
+            // local profile. Asked with the "online" filter (the badge on the HOME Menu), only those
+            // who are online count.
+            count = 0;
+
+            if (IsNextendoProfile(userId))
+            {
+                bool onlineOnly = filter.PresenceStatus is PresenceStatusFilter.Online or PresenceStatusFilter.OnlinePlay or PresenceStatusFilter.OnlineOrOnlinePlay;
+
+                foreach (NextendoFriends.Entry friend in NextendoFriends.Get())
+                {
+                    if (!onlineOnly || friend.Status > 0)
+                    {
+                        count++;
+                    }
+                }
+            }
 
             Logger.Stub?.PrintStub(LogClass.ServiceFriend, new { userId, filter, pidPlaceholder, pid });
 
@@ -657,6 +809,191 @@ namespace Ryujinx.Horizon.Sdk.Friends.Detail.Ipc
             return Result.Success;
         }
 
+        // [Nextendo, HOME Menu work] The page of one friend (SDK 20+): asked when a tile is opened.
+        [CmifCommand(20107)]
+        public Result GetFriendDetailedInfoV2(
+            [Buffer(HipcBufferFlags.Out | HipcBufferFlags.Pointer, 0x800)] out FriendDetailedInfoImpl detailedInfo,
+            Uid userId,
+            NetworkServiceAccountId friendId)
+        {
+            detailedInfo = default;
+
+            Span<byte> info = MemoryMarshal.AsBytes(MemoryMarshal.CreateSpan(ref detailedInfo, 1));
+
+            if (IsNextendoProfile(userId))
+            {
+                // What is known so far of this record: the head is the friend record's (ids at 0
+                // and 0x10, name at 0x18), the address of the picture is at 0x40, and games sit in
+                // up to twenty 0x30-byte entries from 0xE0 (the play history), each led by a title id.
+                // The account server only tells what is played now: that game opens the list.
+                foreach (NextendoFriends.Entry entry in NextendoFriends.Get())
+                {
+                    if (entry.Pid != friendId.Id && (entry.Nsa == 0 || entry.Nsa != friendId.Id))
+                    {
+                        continue;
+                    }
+
+                    FriendImpl head = MakeNextendoFriend(friendId.Id, entry.Name, PresenceStatus.Offline);
+
+                    // One friend asked alone is a friend page being opened (a page that walks the
+                    // whole list asks them all in a row).
+                    if (!NextendoFriends.Sweeping)
+                    {
+                        NextendoActivity.Set("Friend:" + entry.Name);
+                    }
+
+                    MemoryMarshal.AsBytes(MemoryMarshal.CreateReadOnlySpan(ref head, 1))[..0x40].CopyTo(info);
+
+                    // The play history: up to twenty entries of 0x30 bytes, laid out like the
+                    // play log the console receives for a friend (application id, presence group
+                    // id, times played, minutes played, first and last time played). The game
+                    // being played now opens the list when the history does not have it yet.
+                    List<NextendoFriends.Played> played = new(NextendoFriends.History(entry.Pid, 2500));
+
+                    // An entry the server could not name has no title card to show.
+                    played.RemoveAll(g => string.IsNullOrEmpty(g.Name));
+
+                    if (entry.Status > 0 && entry.AppId != 0 && !played.Exists(g => g.TitleId == entry.AppId))
+                    {
+                        played.Insert(0, new NextendoFriends.Played(entry.AppId, entry.Game, 0, DateTimeOffset.UtcNow.ToUnixTimeSeconds()));
+                    }
+
+                    for (int g = 0; g < played.Count && g < 20; g++)
+                    {
+                        Span<byte> slot = info.Slice(0xE0 + g * 0x30, 0x30);
+
+                        // Entry layout, found by probing the page: title id, presence group id,
+                        // then at 0x18 the number of times played, at 0x1C the minutes played, at
+                        // 0x20 the first time played and at 0x28 the last one. The server does not
+                        // know the first time: left empty, the page tells how long the game was
+                        // played instead of "first played ... ago".
+                        BitConverter.TryWriteBytes(slot.Slice(0x00, 8), played[g].TitleId);
+                        BitConverter.TryWriteBytes(slot.Slice(0x08, 8), played[g].TitleId);
+                        BitConverter.TryWriteBytes(slot.Slice(0x18, 4), 1);
+                        BitConverter.TryWriteBytes(slot.Slice(0x1C, 4), (int)Math.Min(int.MaxValue, played[g].Seconds / 60));
+                        BitConverter.TryWriteBytes(slot.Slice(0x28, 8), played[g].LastPlayed);
+                    }
+
+                    // Two flags the "Trending With Friends" page reads before the entries (myPage
+                    // 22.5.0, 0x4DDC18): the record is valid (0x608) and the play history is
+                    // there (0x4A0, the history starting at 0x10). Either one at 0 and the friend's
+                    // games were left out: the page stayed empty.
+                    info[0x608] = 1;
+                    info[0x4A0] = (byte)(played.Count > 0 ? 1 : 0);
+
+                    // The game being played now, for the top line of the page: its id sits at
+                    // 0x570 (found by probing: the menu asks the title card of what is there).
+                    if (entry.Status > 0 && entry.AppId != 0)
+                    {
+                        BitConverter.TryWriteBytes(info.Slice(0x570, 8), entry.AppId);
+                        BitConverter.TryWriteBytes(info.Slice(0x578, 8), entry.AppId);
+                        Logger.Info?.Print(LogClass.ServiceFriend, $"[Nextendo] friend 0x{friendId.Id:X} plays {entry.AppId:X16} ({entry.Game}) on {entry.Platform}");
+                    }
+                    else if (entry.Status > 0)
+                    {
+                        // online without a game (the HOME Menu of a console): the page shows a card
+                        // for the game all the same, a "?" "Loading failed" for an id of 0; the
+                        // HOME Menu's card instead, as on the user's own page
+                        BitConverter.TryWriteBytes(info.Slice(0x570, 8), NextendoGames.HomeMenuId);
+                        BitConverter.TryWriteBytes(info.Slice(0x578, 8), NextendoGames.HomeMenuId);
+                    }
+
+                    // "Friends since", in Unix seconds (found at 0x5D0 by probing).
+                    if (entry.Since > 0)
+                    {
+                        BitConverter.TryWriteBytes(info.Slice(0x5D0, 8), entry.Since);
+                    }
+
+                    break;
+                }
+            }
+
+            Logger.Info?.Print(LogClass.ServiceFriend, $"[Nextendo] GetFriendDetailedInfoV2 friend 0x{friendId.Id:X}");
+
+            if (friendId.Id != 0)
+            {
+                NextendoFriends.TellFriendDetailsAsked(friendId.Id);
+            }
+
+            return Result.Success;
+        }
+
+        // [Nextendo, HOME Menu work] LoadFriendSettingV2 (22.0.0+): the settings kept for a
+        // friend (best friend, memo), asked by the friend page. The reply has to be exactly
+        // 0x80 bytes; its fields are not known yet, an empty one reads as "no setting".
+        // (The method keeps its first name: this command was first taken for the presence.
+        // The game being played is in the list record, see WriteNextendoFriendV2.)
+        [CmifCommand(20111)]
+        public Result GetFriendPresenceV2(
+            [Buffer(HipcBufferFlags.Out | HipcBufferFlags.Pointer, FriendPresenceV2Impl.Size)] out FriendPresenceV2Impl presence,
+            Uid userId,
+            NetworkServiceAccountId friendId)
+        {
+            presence = default;
+
+            Span<byte> view = MemoryMarshal.AsBytes(MemoryMarshal.CreateSpan(ref presence, 1));
+
+            Logger.Info?.Print(LogClass.ServiceFriend, $"[Nextendo] GetFriendPresenceV2 friend 0x{friendId.Id:X}");
+
+            // asked for the friend whose page is shown
+            if (friendId.Id != 0)
+            {
+                NextendoFriends.TellFriendPageShown(friendId.Id);
+            }
+
+            return Result.Success;
+        }
+
+        [CmifCommand(20108)]
+        public Result GetFriendListForViewerV2(
+            out int count,
+            [Buffer(HipcBufferFlags.Out | HipcBufferFlags.MapAlias)] Span<FriendImpl> friendList,
+            Uid userId,
+            int offset,
+            SizedFriendFilter filter)
+        {
+            count = 0;
+
+            Logger.Stub?.PrintStub(LogClass.ServiceFriend, new { userId, offset, filter });
+
+            if (userId.IsNull || offset < 0)
+            {
+                return FriendResult.InvalidArgument;
+            }
+
+            // Meme remplissage que GetFriendList : les vrais amis Nextendo avec
+            // leur presence reelle. MyPage (SDK 22) ne lit QUE cette version V2 :
+            // la laisser vide, c'est une liste d'amis vide a l'ecran.
+            if (IsNextendoProfile(userId) && offset == 0)
+            {
+                NextendoActivity.Set("FriendList");
+            }
+
+            if (IsNextendoProfile(userId) && (offset == 0 || WantsNsaIds()))
+            {
+                IReadOnlyList<NextendoFriends.Entry> friends = WantsNsaIds() ? NextendoFriends.GetWarm(2000) : NextendoFriends.Get();
+                bool wantNsa = WantsNsaIds();
+                int n = Math.Min(Math.Max(0, friends.Count - offset), friendList.Length);
+                for (int i = 0; i < n; i++)
+                {
+                    var entry = friends[offset + i];
+                    ulong lid = wantNsa && entry.Nsa != 0 ? entry.Nsa : entry.Pid;
+                    PresenceStatus st = entry.Status > 0 ? PresenceStatus.OnlinePlay : PresenceStatus.Offline;
+                    Span<byte> raw = MemoryMarshal.AsBytes(friendList);
+
+                    if ((i + 1) * FriendRecordV2Size <= raw.Length)
+                    {
+                        WriteNextendoFriendV2(raw.Slice(i * FriendRecordV2Size, FriendRecordV2Size), lid, entry);
+                    }
+                }
+                count = n;
+            }
+
+            Logger.Info?.Print(LogClass.ServiceFriend, $"[Nextendo] GetFriendListForViewerV2 -> offset={offset} count={count} buffer={friendList.Length * 0x200} bytes");
+
+            return Result.Success;
+        }
+
         [CmifCommand(20110)]
         public Result LoadFriendSetting(
             [Buffer(HipcBufferFlags.Out | HipcBufferFlags.Pointer, 0x40)] out FriendSettingImpl friendSetting,
@@ -673,7 +1010,9 @@ namespace Ryujinx.Horizon.Sdk.Friends.Detail.Ipc
         [CmifCommand(20200)]
         public Result GetReceivedFriendRequestCount(out int count, out int count2, Uid userId)
         {
-            count = 0;
+            // [Nextendo, HOME Menu work] The requests received by the Nextendo account.
+            // The page adds the two (unread, then read): all the requests count once, as unread.
+            count = IsNextendoProfile(userId) ? NextendoFriends.Requests().Count : 0;
             count2 = 0;
 
             Logger.Stub?.PrintStub(LogClass.ServiceFriend, new { userId });
@@ -694,6 +1033,78 @@ namespace Ryujinx.Horizon.Sdk.Friends.Detail.Ipc
             Logger.Stub?.PrintStub(LogClass.ServiceFriend, new { userId, arg3, arg4 });
 
             return Result.Success;
+        }
+
+        [CmifCommand(20203)] // 22.0.0+
+        public Result GetFriendRequestReceivedNotificationCount(out int count, Uid userId)
+        {
+            count = IsNextendoProfile(userId) ? NextendoFriends.Requests().Count : 0;
+
+            return Result.Success;
+        }
+
+        // [Nextendo, HOME Menu work] The list of friend requests (SDK 20+): received or sent,
+        // by the type asked. The layout of a record is being worked out: the probe writes known
+        // values for the page to show.
+        [CmifCommand(20202)]
+        public Result GetFriendRequestListV2(
+            out int count,
+            [Buffer(HipcBufferFlags.Out | HipcBufferFlags.MapAlias)] Span<byte> requestList,
+            Uid userId,
+            int offset,
+            int type)
+        {
+            count = 0;
+            requestList.Clear();
+
+            IReadOnlyList<NextendoFriends.Entry> requests = !IsNextendoProfile(userId) ? []
+                : type == 0 ? NextendoFriends.Sent() : NextendoFriends.Requests();
+
+            int size = FriendRequestV2Size;
+
+            for (int i = offset; i < requests.Count && (count + 1) * size <= requestList.Length; i++)
+            {
+                WriteFriendRequestV2(requestList.Slice(count * size, size), requests[i]);
+
+                count++;
+            }
+
+            Logger.Info?.Print(LogClass.ServiceFriend, $"[Nextendo] GetFriendRequestListV2 type={type} offset={offset} buffer=0x{requestList.Length:X} -> {count} request(s)");
+
+            return Result.Success;
+        }
+
+        private const int FriendRequestV2Size = 0x200; // 0x200 each: the SDK sizes the buffer as count << 9
+
+        private static void WriteFriendRequestV2(Span<byte> record, NextendoFriends.Entry entry)
+        {
+
+            // Found by probing the received list: the request id at 0, the account the request
+            // comes from (or goes to) at 0x18: the page asks its profile (GetProfileExtraListV2).
+            BitConverter.TryWriteBytes(record.Slice(0x00, 8), entry.Pid);
+            BitConverter.TryWriteBytes(record.Slice(0x18, 8), entry.Nsa != 0 ? entry.Nsa : entry.Pid);
+
+            // The nickname at 0x20 (found the same way: the tile shows the text there).
+            byte[] nick = System.Text.Encoding.UTF8.GetBytes(entry.Name);
+            nick.AsSpan(0, Math.Min(nick.Length, 0x20)).CopyTo(record.Slice(0x20, 0x21));
+
+            // The address of the picture at 0x48: the page downloads it itself.
+            // An account with no picture of its own has the default avatar of Nextendo, served by
+            // the emulator (the server has no address for it).
+            string pictureUrl = entry.HasPicture
+                ? $"{NextendoEndpoint.Canonical.TrimEnd('/')}/api/avatar?pid={entry.Pid}"
+                : NextendoLocalImages.DefaultAvatarUrl(entry.Pid);
+            byte[] picture = System.Text.Encoding.ASCII.GetBytes(pictureUrl);
+            picture.AsSpan(0, Math.Min(picture.Length, 0x9F)).CopyTo(record.Slice(0x48, 0xA0));
+
+            // The date of the request at 0x158 (found by probing: one date per free slot, the
+            // detail page showed the one of the slot 43).
+            BitConverter.TryWriteBytes(record.Slice(0x158, 8), entry.RequestedAt);
+
+            // How the request was made, at 0xEC (found by probing the detail page): 1 a local
+            // search, 2 a friend code, 3 a game (its id then at 0xF8). Requests to Nextendo go
+            // through friend codes (the site and the console both send by code).
+            BitConverter.TryWriteBytes(record.Slice(0xEC, 4), 2);
         }
 
         [CmifCommand(20300)]
@@ -799,6 +1210,98 @@ namespace Ryujinx.Horizon.Sdk.Friends.Detail.Ipc
             return Result.Success;
         }
 
+        // [Nextendo, HOME Menu work] The profiles of accounts that are not (yet) friends: the
+        // senders of friend requests, the people met. Looked up among the requests, then the
+        // friends. Each record (its size given by the buffer) is laid out like the head of a
+        // friend record: ids, then the nickname, and the "valid" flag in its last byte.
+        [CmifCommand(20502)] // 19.0.0+
+        public Result GetProfileExtraListV2(
+            [Buffer(HipcBufferFlags.Out | HipcBufferFlags.MapAlias)] Span<byte> extraList,
+            Uid userId,
+            [Buffer(HipcBufferFlags.In | HipcBufferFlags.Pointer)] ReadOnlySpan<NetworkServiceAccountId> accountIds)
+        {
+            extraList.Clear();
+
+            int size = accountIds.Length > 0 ? extraList.Length / accountIds.Length : 0;
+            int filled = 0;
+
+            for (int i = 0; size >= 0x41 && i < accountIds.Length && (i + 1) * size <= extraList.Length; i++)
+            {
+                ulong wanted = accountIds[i].Id;
+                NextendoFriends.Entry entry = default;
+                bool found = false;
+
+                foreach (IReadOnlyList<NextendoFriends.Entry> list in new[] { NextendoFriends.Requests(), NextendoFriends.Sent(), NextendoFriends.Get() })
+                {
+                    foreach (NextendoFriends.Entry candidate in list)
+                    {
+                        if (candidate.Pid == wanted || (candidate.Nsa != 0 && candidate.Nsa == wanted))
+                        {
+                            entry = candidate;
+                            found = true;
+                            break;
+                        }
+                    }
+
+                    if (found)
+                    {
+                        break;
+                    }
+                }
+
+                if (!found)
+                {
+                    continue;
+                }
+
+                Span<byte> record = extraList.Slice(i * size, size);
+
+                // nn::friends ProfileExtra, laid out as the accessors of the HOME Menu read it: the
+                // account id at 0 (the page of a request looks its profile up by it), the nickname
+                // at 8, the address of the picture at 0x30, twenty played games of 0x30 bytes from
+                // 0xD0 (same entries as the friend's history) and "valid" at 0x490.
+                BitConverter.TryWriteBytes(record.Slice(0x00, 8), wanted);
+
+                byte[] nickname = Encoding.UTF8.GetBytes(entry.Name ?? "");
+                nickname.AsSpan(0, Math.Min(nickname.Length, 0x20)).CopyTo(record.Slice(0x08, 0x21));
+
+                if (size >= 0xD0)
+                {
+                    string pictureUrl = entry.HasPicture
+                        ? $"{NextendoEndpoint.Canonical.TrimEnd('/')}/api/avatar?pid={entry.Pid}"
+                        : NextendoLocalImages.DefaultAvatarUrl(entry.Pid);
+                    byte[] picture = Encoding.ASCII.GetBytes(pictureUrl);
+                    picture.AsSpan(0, Math.Min(picture.Length, 0x9F)).CopyTo(record.Slice(0x30, 0xA0));
+                }
+
+                if (size >= 0x490)
+                {
+                    List<NextendoFriends.Played> played = new(NextendoFriends.History(entry.Pid, 2500, direct: true));
+
+                    played.RemoveAll(g => string.IsNullOrEmpty(g.Name));
+
+                    for (int g = 0; g < played.Count && g < 20; g++)
+                    {
+                        Span<byte> slot = record.Slice(0xD0 + g * 0x30, 0x30);
+
+                        BitConverter.TryWriteBytes(slot.Slice(0x00, 8), played[g].TitleId);
+                        BitConverter.TryWriteBytes(slot.Slice(0x08, 8), played[g].TitleId);
+                        BitConverter.TryWriteBytes(slot.Slice(0x18, 4), 1);
+                        BitConverter.TryWriteBytes(slot.Slice(0x1C, 4), (int)Math.Min(int.MaxValue, played[g].Seconds / 60));
+                        BitConverter.TryWriteBytes(slot.Slice(0x28, 8), played[g].LastPlayed);
+                    }
+                }
+
+                record[size >= 0x491 ? 0x490 : size - 1] = 1; // "valid", found by bisecting the received list (record of 0x4A8)
+
+                filled++;
+            }
+
+            Logger.Info?.Print(LogClass.ServiceFriend, $"[Nextendo] GetProfileExtraListV2 -> {accountIds.Length} ids (first 0x{(accountIds.Length > 0 ? accountIds[0].Id : 0):X}), buffer 0x{extraList.Length:X}, record 0x{size:X}, {filled} filled");
+
+            return Result.Success;
+        }
+
         [CmifCommand(20501)]
         public Result GetRelationship(out Relationship relationship, Uid userId, NetworkServiceAccountId friendId)
         {
@@ -813,6 +1316,69 @@ namespace Ryujinx.Horizon.Sdk.Friends.Detail.Ipc
         public Result GetUserPresenceView([Buffer(HipcBufferFlags.Out | HipcBufferFlags.Pointer, 0xE0)] out UserPresenceViewImpl userPresenceView, Uid userId)
         {
             userPresenceView = default;
+
+            Logger.Stub?.PrintStub(LogClass.ServiceFriend, new { userId });
+
+            return Result.Success;
+        }
+
+        // [Nextendo, HOME Menu work] The friend list of SDK 20+ comes in two steps: 20108 gives
+        // the list, then this command is handed every friend's id at once (a pointer buffer of
+        // 8-byte ids) and returns one 0x220-byte record per id, which is where the name, the
+        // picture and the presence shown on each tile are read.
+        [CmifCommand(20109)]
+        public Result GetFriendDetailListV2(
+            [Buffer(HipcBufferFlags.Out | HipcBufferFlags.MapAlias)] Span<byte> records,
+            Uid userId,
+            [Buffer(HipcBufferFlags.In | HipcBufferFlags.Pointer)] ReadOnlySpan<NetworkServiceAccountId> friendIds)
+        {
+            const int RecordSize = FriendRecordV2Size;
+
+            records.Clear();
+
+
+            IReadOnlyList<NextendoFriends.Entry> friends = IsNextendoProfile(userId) ? NextendoFriends.Get() : [];
+            int filled = 0;
+
+            for (int i = 0; i < friendIds.Length && (i + 1) * RecordSize <= records.Length; i++)
+            {
+                ulong wanted = friendIds[i].Id;
+
+                foreach (NextendoFriends.Entry entry in friends)
+                {
+                    if (entry.Pid != wanted && (entry.Nsa == 0 || entry.Nsa != wanted))
+                    {
+                        continue;
+                    }
+
+                    WriteNextendoFriendV2(records.Slice(i * RecordSize, RecordSize), wanted, entry);
+
+                    filled++;
+
+                    break;
+                }
+            }
+
+            Logger.Info?.Print(LogClass.ServiceFriend, $"[Nextendo] GetFriendDetailListV2 -> {friendIds.Length} ids (first 0x{(friendIds.Length > 0 ? friendIds[0].Id : 0):X}), {filled} records, buffer 0x{records.Length:X}");
+
+            return Result.Success;
+        }
+
+        [CmifCommand(20601)]
+        public Result GetUserPresenceViewV2([Buffer(HipcBufferFlags.Out | HipcBufferFlags.Pointer, UserPresenceViewV2Impl.Size)] out UserPresenceViewV2Impl userPresenceView, Uid userId)
+        {
+            userPresenceView = default;
+
+            Span<byte> view = MemoryMarshal.AsBytes(MemoryMarshal.CreateSpan(ref userPresenceView, 1));
+
+            // The signed-in Nextendo profile is online; any other local profile is not.
+            if (IsNextendoProfile(userId) && NextendoAccount.IsLinked)
+            {
+                // Like a friend's record: the application being played first, then the
+                // presence, whose status is 0x18 further (found by probing).
+                BitConverter.TryWriteBytes(view[..8], NextendoGames.Playing);
+                view[0x20] = (byte)PresenceStatus.OnlinePlay;
+            }
 
             Logger.Stub?.PrintStub(LogClass.ServiceFriend, new { userId });
 
@@ -852,6 +1418,78 @@ namespace Ryujinx.Horizon.Sdk.Friends.Detail.Ipc
         [CmifCommand(20801)]
         public Result SyncUserSetting(Uid userId)
         {
+            Logger.Stub?.PrintStub(LogClass.ServiceFriend, new { userId });
+
+            return Result.Success;
+        }
+
+        [CmifCommand(20802)]
+        public Result LoadUserSettingV2([Buffer(HipcBufferFlags.Out | HipcBufferFlags.Pointer, 0x800)] out UserSettingImpl userSetting, Uid userId)
+        {
+            userSetting = default;
+
+            Span<byte> setting = MemoryMarshal.AsBytes(MemoryMarshal.CreateSpan(ref userSetting, 1));
+
+            if (IsNextendoProfile(userId) && NextendoAccount.IsLinked)
+            {
+                // the user's own page asks for these settings too (its friend code), not only the
+                // page to add a friend: Discord said "Adding a friend" on the profile
+                NextendoActivity.Set("Profile");
+
+                // The user's own settings: who they are, then their friend code as text.
+                MemoryMarshal.Write(setting, in userId);
+
+                int codeAt = 0x20;
+                string code = NextendoAccount.FriendCode ?? "";
+
+                // The menu writes "SW-" itself in front of the code.
+                if (code.StartsWith("SW-", StringComparison.OrdinalIgnoreCase))
+                {
+                    code = code[3..];
+                }
+
+                if (code.Length > 0)
+                {
+                    Encoding.ASCII.GetBytes(code).AsSpan(0, Math.Min(code.Length, 0x1F)).CopyTo(setting.Slice(codeAt, 0x20));
+                }
+
+                // The user's own profile, with the games played (the profile page shows them):
+                // a ProfileExtra as the friends' ones, at 0x48.
+                int extraAt = 0x48;
+
+                if (extraAt + 0x4A8 <= setting.Length)
+                {
+                    Span<byte> extra = setting.Slice(extraAt, 0x4A8);
+
+                    BitConverter.TryWriteBytes(extra.Slice(0x00, 8), NextendoAccount.Pid);
+
+                    byte[] nickname = Encoding.UTF8.GetBytes(NextendoAccount.Username ?? "");
+                    nickname.AsSpan(0, Math.Min(nickname.Length, 0x20)).CopyTo(extra.Slice(0x08, 0x21));
+
+                    byte[] picture = Encoding.ASCII.GetBytes($"{NextendoEndpoint.Canonical.TrimEnd('/')}/api/avatar?pid={NextendoAccount.Pid}");
+                    picture.AsSpan(0, Math.Min(picture.Length, 0x9F)).CopyTo(extra.Slice(0x30, 0xA0));
+
+                    List<NextendoFriends.Played> played = new(NextendoFriends.OwnHistory());
+
+                    played.RemoveAll(g => string.IsNullOrEmpty(g.Name));
+
+                    for (int g = 0; g < played.Count && g < 20; g++)
+                    {
+                        Span<byte> slot = extra.Slice(0xD0 + g * 0x30, 0x30);
+
+                        BitConverter.TryWriteBytes(slot.Slice(0x00, 8), played[g].TitleId);
+                        BitConverter.TryWriteBytes(slot.Slice(0x08, 8), played[g].TitleId);
+                        BitConverter.TryWriteBytes(slot.Slice(0x18, 4), 1);
+                        BitConverter.TryWriteBytes(slot.Slice(0x1C, 4), (int)Math.Min(int.MaxValue, played[g].Seconds / 60));
+                        BitConverter.TryWriteBytes(slot.Slice(0x28, 8), played[g].LastPlayed);
+                    }
+
+                    extra[0x490] = 1;
+
+                    Logger.Info?.Print(LogClass.ServiceFriend, $"[Nextendo] LoadUserSettingV2: own profile with {Math.Min(played.Count, 20)} game(s) played");
+                }
+            }
+
             Logger.Stub?.PrintStub(LogClass.ServiceFriend, new { userId });
 
             return Result.Success;
@@ -979,7 +1617,7 @@ namespace Ryujinx.Horizon.Sdk.Friends.Detail.Ipc
         [CmifCommand(30202)]
         public Result CancelFriendRequest(Uid userId, RequestId requestId)
         {
-            Logger.Stub?.PrintStub(LogClass.ServiceFriend, new { userId, requestId });
+            Logger.Info?.Print(LogClass.ServiceFriend, $"[Nextendo] cancel friend request to {requestId.Id}: {(IsNextendoProfile(userId) && NextendoFriends.CancelRequest(requestId.Id) ? "done" : "failed")}");
 
             return Result.Success;
         }
@@ -987,7 +1625,7 @@ namespace Ryujinx.Horizon.Sdk.Friends.Detail.Ipc
         [CmifCommand(30203)]
         public Result AcceptFriendRequest(Uid userId, RequestId requestId)
         {
-            Logger.Stub?.PrintStub(LogClass.ServiceFriend, new { userId, requestId });
+            Logger.Info?.Print(LogClass.ServiceFriend, $"[Nextendo] accept friend request from {requestId.Id}: {(IsNextendoProfile(userId) && NextendoFriends.Answer(requestId.Id, accept: true) ? "done" : "failed")}");
 
             return Result.Success;
         }
@@ -995,7 +1633,7 @@ namespace Ryujinx.Horizon.Sdk.Friends.Detail.Ipc
         [CmifCommand(30204)]
         public Result RejectFriendRequest(Uid userId, RequestId requestId)
         {
-            Logger.Stub?.PrintStub(LogClass.ServiceFriend, new { userId, requestId });
+            Logger.Info?.Print(LogClass.ServiceFriend, $"[Nextendo] decline friend request from {requestId.Id}: {(IsNextendoProfile(userId) && NextendoFriends.Answer(requestId.Id, accept: false) ? "done" : "failed")}");
 
             return Result.Success;
         }

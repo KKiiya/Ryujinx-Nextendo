@@ -327,6 +327,7 @@ namespace Ryujinx.HLE.Loaders.Processes
             }
 
             ulong[] nsoBase = new ulong[executables.Length];
+            bool[] themePageAt = new bool[executables.Length];
 
             for (int index = 0; index < executables.Length; index++)
             {
@@ -349,6 +350,12 @@ namespace Ryujinx.HLE.Loaders.Processes
                 }
 
                 nsoSize = BitUtils.AlignUp<uint>(nsoSize, KPageTableBase.PageSize);
+
+                // [Nextendo, HOME Menu themes] Room after the HOME Menu's image for its themes page.
+                uint themePage = HOS.Themes.QlaunchThemePage.ExtraSize(buildIds[index], nsoSize);
+
+                themePageAt[index] = themePage != 0;
+                nsoSize += themePage;
 
                 nsoBase[index] = codeStart + codeSize;
 
@@ -472,6 +479,13 @@ namespace Ryujinx.HLE.Loaders.Processes
 
                     return ProcessResult.Failed;
                 }
+
+                HOS.NextendoControllerPictures.AllowRailEffect(process, nsoBase[index]);
+
+                if (themePageAt[index])
+                {
+                    HOS.Themes.QlaunchThemePage.Apply(process, nsoBase[index]);
+                }
             }
 
             process.DefaultCpuCore = meta.DefaultCpuId;
@@ -503,6 +517,13 @@ namespace Ryujinx.HLE.Loaders.Processes
                 meta.MainThreadPriority,
                 meta.MainThreadStackSize,
                 device.System.State.DesiredTitleLanguage);
+
+            // [Nextendo, HOME Menu work] arp holds the properties of applications, and has room
+            // for two: library applets (0100000000001001 and up) are not registered there.
+            if (programId is > 0x0100000000001000 and <= 0x0100000000001FFF)
+            {
+                return processResult;
+            }
 
             // Register everything in arp service.
             device.System.ServiceTable.ArpWriter.AcquireRegistrar(out IRegistrar registrar);

@@ -3,6 +3,8 @@ using Ryujinx.Horizon.Bcat.Types;
 using Ryujinx.Horizon.Common;
 using Ryujinx.Horizon.Sdk.Bcat;
 using Ryujinx.Horizon.Sdk.Sf;
+using Ryujinx.Horizon.Sdk.Sf.Hipc;
+using System;
 
 namespace Ryujinx.Horizon.Bcat.Ipc
 {
@@ -39,6 +41,25 @@ namespace Ryujinx.Horizon.Bcat.Ipc
             Ryujinx.Common.Logging.Logger.Info?.Print(Ryujinx.Common.Logging.LogClass.ServiceBcat,
                 $"[Nextendo] RequestSyncDeliveryCacheWithDirectoryName(\"{directoryName}\") -> synchronisation consideree comme terminee");
 
+            return Result.Success;
+        }
+        // [Nextendo, HOME Menu work] RegisterSystemApplicationDeliveryTasks(): no input, no
+        // output (the request carries no buffer at all, seen with the [ipc-shape] trace).
+        // Nothing is delivered in the background here, so there is nothing to register.
+        // [Nextendo, HOME Menu work] RequestSuspendDeliveryTask(ApplicationId) -> object. The
+        // HOME Menu asks for it before opening the eShop or Nintendo Switch Online and keeps the
+        // returned interface; no delivery runs here, so the object has nothing to suspend.
+        [CmifCommand(20301)]
+        public Result RequestSuspendDeliveryTask(ulong applicationId, out IDeliveryCacheProgressService suspension)
+        {
+            suspension = new DeliveryCacheProgressService();
+
+            return Result.Success;
+        }
+
+        [CmifCommand(30300)]
+        public Result RegisterSystemApplicationDeliveryTasks()
+        {
             return Result.Success;
         }
     }

@@ -19,6 +19,7 @@ using Ryujinx.Ava.UI.Applet;
 using Ryujinx.Ava.UI.Helpers;
 using Ryujinx.Ava.UI.Models;
 using Ryujinx.Ava.UI.ViewModels;
+using Ryujinx.Ava.UI.Views.Misc;
 using Ryujinx.Ava.Utilities;
 using Ryujinx.Common;
 using Ryujinx.Common.Helper;
@@ -27,6 +28,7 @@ using Ryujinx.Common.UI;
 using Ryujinx.Graphics.Gpu;
 using Ryujinx.HLE.FileSystem;
 using Ryujinx.HLE.HOS;
+using Ryujinx.HLE.HOS.Applets.MyPage;
 using Ryujinx.HLE.HOS.Services.Account.Acc;
 using Ryujinx.Input.HLE;
 using Ryujinx.Input.SDL3;
@@ -69,6 +71,395 @@ namespace Ryujinx.Ava.UI.Windows
 
         public SettingsWindow SettingsWindow { get; set; }
 
+        public bool IsNextendoDashboardOpen => NextendoDashboardOverlay.IsVisible || _nextendoGameDashboardWindow?.IsVisible == true;
+
+        private Point _nextendoDashboardResizeStart;
+        private double _nextendoDashboardResizeWidth;
+        private double _nextendoDashboardResizeHeight;
+        private bool _isResizingNextendoDashboard;
+        private bool _dashboardBlockedGameInput;
+        private bool _nextendoDashboardTakesFocus;
+        private NextendoProfileView _activeNextendoDashboard;
+        private Avalonia.Controls.Window _nextendoGameDashboardWindow;
+        private Border _nextendoGameDashboardFrame;
+        private Point _gameDashboardResizeStart;
+        private double _gameDashboardResizeWidth;
+        private double _gameDashboardResizeHeight;
+        private bool _isResizingGameDashboard;
+
+        /// <summary>Shows or hides the Nextendo dashboard in the main window over the renderer.</summary>
+        public void ToggleNextendoDashboard()
+        {
+            if (IsNextendoDashboardOpen)
+            {
+                CloseNextendoDashboard();
+
+                return;
+            }
+
+            NextendoProfileView dashboard = new(ViewModel.IsGameRunning);
+            _activeNextendoDashboard = dashboard;
+            dashboard.CloseRequested += (_, _) => CloseNextendoDashboard();
+            SuspendGameControllerInputForDashboard();
+
+            int savedWidth = ConfigurationState.Instance.UI.WindowStartup.NextendoDashboardWidth.Value;
+            int savedHeight = ConfigurationState.Instance.UI.WindowStartup.NextendoDashboardHeight.Value;
+
+            if (ViewModel.IsGameRunning)
+            {
+                OpenGameDashboardWindow(dashboard, savedWidth, savedHeight);
+                return;
+            }
+
+            NextendoDashboardContent.Content = dashboard;
+            if (savedWidth >= 700 && savedHeight >= 400)
+            {
+                NextendoDashboardFrame.Width = savedWidth;
+                NextendoDashboardFrame.Height = savedHeight;
+                NextendoDashboardFrame.HorizontalAlignment = Avalonia.Layout.HorizontalAlignment.Center;
+                NextendoDashboardFrame.VerticalAlignment = Avalonia.Layout.VerticalAlignment.Center;
+            }
+            else
+            {
+                // Fit the default dashboard to the requested 3-column by 2-row
+                // friend layout, including the navigation rail and outer margins.
+                NextendoDashboardFrame.Width = 1100;
+                NextendoDashboardFrame.Height = 780;
+                NextendoDashboardFrame.HorizontalAlignment = Avalonia.Layout.HorizontalAlignment.Center;
+                NextendoDashboardFrame.VerticalAlignment = Avalonia.Layout.VerticalAlignment.Center;
+            }
+
+            NextendoDashboardOverlay.IsVisible = true;
+
+            // Persist the initial friend-grid size on first use.
+            if (savedWidth < 700 || savedHeight < 400)
+            {
+                Dispatcher.UIThread.Post(SaveInitialNextendoDashboardSize, DispatcherPriority.Loaded);
+            }
+        }
+
+        /// <summary>Routes the firmware's MyPage invite picker into the in-game dashboard.</summary>
+        public void OpenGameInvitationDashboard(FriendInvitationRequest request, Action<bool> completed)
+        {
+            if (request == null || !ViewModel.IsGameRunning)
+            {
+                completed?.Invoke(false);
+                return;
+            }
+
+            NextendoProfileView dashboard = _activeNextendoDashboard;
+            if (dashboard == null)
+            {
+                dashboard = new NextendoProfileView(isGameRunning: true);
+                _activeNextendoDashboard = dashboard;
+                dashboard.CloseRequested += (_, _) => CloseNextendoDashboard();
+                SuspendGameControllerInputForDashboard();
+                OpenGameDashboardWindow(dashboard,
+                    ConfigurationState.Instance.UI.WindowStartup.NextendoDashboardWidth.Value,
+                    ConfigurationState.Instance.UI.WindowStartup.NextendoDashboardHeight.Value);
+            }
+
+            dashboard.BeginGameInvitation(request, sent =>
+            {
+                completed?.Invoke(sent);
+                // Let the synchronous applet caller resume and return focus to the game.
+                Dispatcher.UIThread.Post(CloseNextendoDashboard);
+            });
+        }
+
+        private void OpenGameDashboardWindow(NextendoProfileView dashboard, int savedWidth, int savedHeight)
+        {
+            double overlayWidth = Math.Max(700, ClientSize.Width);
+            double overlayHeight = Math.Max(400, ClientSize.Height);
+            double maxWidth = Math.Max(700, overlayWidth - 48);
+            double maxHeight = Math.Max(400, overlayHeight - 48);
+            double width = savedWidth >= 700 ? Math.Min(savedWidth, maxWidth) : Math.Min(1100, maxWidth);
+            double height = savedHeight >= 400 ? Math.Min(savedHeight, maxHeight) : Math.Min(780, maxHeight);
+
+            Grid overlay = new()
+            {
+                Background = new Avalonia.Media.SolidColorBrush(Avalonia.Media.Color.Parse("#B8000000")),
+            };
+            Border frame = new()
+            {
+                Width = width,
+                Height = height,
+                MinWidth = 700,
+                MinHeight = 400,
+                MaxWidth = Math.Max(700, overlayWidth - 24),
+                MaxHeight = Math.Max(400, overlayHeight - 24),
+                Margin = new Thickness(24),
+                HorizontalAlignment = Avalonia.Layout.HorizontalAlignment.Center,
+                VerticalAlignment = Avalonia.Layout.VerticalAlignment.Center,
+                Background = Avalonia.Media.Brush.Parse("#FF1E2025"),
+                BorderBrush = Avalonia.Media.Brush.Parse("#447F8C9B"),
+                BorderThickness = new Thickness(1),
+                CornerRadius = new CornerRadius(14),
+                BoxShadow = Avalonia.Media.BoxShadows.Parse("0 12 40 0 #80000000"),
+            };
+
+            Grid frameContent = new() { ClipToBounds = true };
+            frameContent.Children.Add(dashboard);
+            Border grip = new()
+            {
+                Width = 24,
+                Height = 24,
+                HorizontalAlignment = Avalonia.Layout.HorizontalAlignment.Right,
+                VerticalAlignment = Avalonia.Layout.VerticalAlignment.Bottom,
+                Background = Avalonia.Media.Brush.Parse("#FF202329"),
+                BorderBrush = Avalonia.Media.Brush.Parse("#887F8C9B"),
+                BorderThickness = new Thickness(1, 1, 0, 0),
+                Child = new TextBlock
+                {
+                    Text = "◢",
+                    FontSize = 15,
+                    Foreground = Avalonia.Media.Brush.Parse("#FF3EE8C8"),
+                    HorizontalAlignment = Avalonia.Layout.HorizontalAlignment.Center,
+                    VerticalAlignment = Avalonia.Layout.VerticalAlignment.Center,
+                },
+            };
+            grip.PointerPressed += GameDashboardResize_PointerPressed;
+            grip.PointerMoved += GameDashboardResize_PointerMoved;
+            grip.PointerReleased += GameDashboardResize_PointerReleased;
+            frameContent.Children.Add(grip);
+            frame.Child = frameContent;
+            overlay.Children.Add(frame);
+
+            Avalonia.Controls.Window window = new()
+            {
+                Width = overlayWidth,
+                Height = overlayHeight,
+                MinWidth = 700,
+                MinHeight = 400,
+                CanResize = false,
+                SystemDecorations = SystemDecorations.None,
+                ShowInTaskbar = false,
+                WindowStartupLocation = WindowStartupLocation.CenterOwner,
+                Background = Avalonia.Media.Brushes.Transparent,
+                TransparencyLevelHint = [WindowTransparencyLevel.Transparent],
+                Content = overlay,
+            };
+
+            _nextendoGameDashboardWindow = window;
+            _nextendoGameDashboardFrame = frame;
+            _nextendoDashboardTakesFocus = true;
+            window.Deactivated += (_, _) => _nextendoDashboardTakesFocus = false;
+            window.Closed += (_, _) =>
+            {
+                if (ReferenceEquals(_nextendoGameDashboardWindow, window))
+                {
+                    _nextendoGameDashboardWindow = null;
+                    _nextendoGameDashboardFrame = null;
+                    _nextendoDashboardTakesFocus = false;
+                    RestoreGameControllerInputAfterDashboard();
+                }
+            };
+
+            try
+            {
+                window.Show(this);
+                window.Activate();
+                if (savedWidth < 700 || savedHeight < 400)
+                {
+                    Dispatcher.UIThread.Post(SaveInitialGameDashboardSize, DispatcherPriority.Loaded);
+                }
+            }
+            catch
+            {
+                _nextendoGameDashboardWindow = null;
+                _nextendoGameDashboardFrame = null;
+                _nextendoDashboardTakesFocus = false;
+                RestoreGameControllerInputAfterDashboard();
+                throw;
+            }
+        }
+
+        private void SaveInitialGameDashboardSize()
+        {
+            if (_nextendoGameDashboardWindow?.IsVisible != true || _nextendoGameDashboardFrame is null)
+            {
+                return;
+            }
+
+            SaveGameDashboardSize();
+        }
+
+        private void SaveGameDashboardSize()
+        {
+            if (_nextendoGameDashboardFrame is null || _nextendoGameDashboardFrame.Bounds.Width < 700 || _nextendoGameDashboardFrame.Bounds.Height < 400)
+            {
+                return;
+            }
+
+            ConfigurationState.Instance.UI.WindowStartup.NextendoDashboardWidth.Value = (int)Math.Round(_nextendoGameDashboardFrame.Bounds.Width);
+            ConfigurationState.Instance.UI.WindowStartup.NextendoDashboardHeight.Value = (int)Math.Round(_nextendoGameDashboardFrame.Bounds.Height);
+            MainWindowViewModel.SaveConfig();
+        }
+
+        private void GameDashboardResize_PointerPressed(object sender, PointerPressedEventArgs e)
+        {
+            if (_nextendoGameDashboardFrame is null || sender is not Control grip || !e.GetCurrentPoint(grip).Properties.IsLeftButtonPressed)
+            {
+                return;
+            }
+
+            _gameDashboardResizeStart = e.GetPosition(_nextendoGameDashboardWindow);
+            _gameDashboardResizeWidth = _nextendoGameDashboardFrame.Bounds.Width;
+            _gameDashboardResizeHeight = _nextendoGameDashboardFrame.Bounds.Height;
+            _isResizingGameDashboard = true;
+            e.Pointer.Capture(grip);
+            e.Handled = true;
+        }
+
+        private void GameDashboardResize_PointerMoved(object sender, PointerEventArgs e)
+        {
+            if (!_isResizingGameDashboard || _nextendoGameDashboardFrame is null || _nextendoGameDashboardWindow is null)
+            {
+                return;
+            }
+
+            Point current = e.GetPosition(_nextendoGameDashboardWindow);
+            double maxWidth = Math.Clamp(_nextendoGameDashboardWindow.ClientSize.Width - 48, 700, 2000);
+            double maxHeight = Math.Clamp(_nextendoGameDashboardWindow.ClientSize.Height - 48, 400, 1400);
+            _nextendoGameDashboardFrame.Width = Math.Clamp(_gameDashboardResizeWidth + current.X - _gameDashboardResizeStart.X, 700, maxWidth);
+            _nextendoGameDashboardFrame.Height = Math.Clamp(_gameDashboardResizeHeight + current.Y - _gameDashboardResizeStart.Y, 400, maxHeight);
+            e.Handled = true;
+        }
+
+        private void GameDashboardResize_PointerReleased(object sender, PointerReleasedEventArgs e)
+        {
+            if (_isResizingGameDashboard)
+            {
+                _isResizingGameDashboard = false;
+                SaveGameDashboardSize();
+                e.Pointer.Capture(null);
+                e.Handled = true;
+            }
+        }
+
+        private void SaveInitialNextendoDashboardSize()
+        {
+            if (!NextendoDashboardOverlay.IsVisible ||
+                NextendoDashboardFrame.Bounds.Width < 700 ||
+                NextendoDashboardFrame.Bounds.Height < 400)
+            {
+                return;
+            }
+
+            ConfigurationState.Instance.UI.WindowStartup.NextendoDashboardWidth.Value = (int)Math.Round(NextendoDashboardFrame.Bounds.Width);
+            ConfigurationState.Instance.UI.WindowStartup.NextendoDashboardHeight.Value = (int)Math.Round(NextendoDashboardFrame.Bounds.Height);
+            MainWindowViewModel.SaveConfig();
+        }
+
+        private void NextendoDashboardResize_PointerPressed(object sender, PointerPressedEventArgs e)
+        {
+            if (sender is not Control grip || !e.GetCurrentPoint(grip).Properties.IsLeftButtonPressed)
+            {
+                return;
+            }
+
+            _nextendoDashboardResizeStart = e.GetPosition(this);
+            _nextendoDashboardResizeWidth = NextendoDashboardFrame.Bounds.Width;
+            _nextendoDashboardResizeHeight = NextendoDashboardFrame.Bounds.Height;
+            _isResizingNextendoDashboard = true;
+            NextendoDashboardFrame.HorizontalAlignment = Avalonia.Layout.HorizontalAlignment.Center;
+            NextendoDashboardFrame.VerticalAlignment = Avalonia.Layout.VerticalAlignment.Center;
+            NextendoDashboardFrame.Width = _nextendoDashboardResizeWidth;
+            NextendoDashboardFrame.Height = _nextendoDashboardResizeHeight;
+            e.Pointer.Capture(grip);
+            e.Handled = true;
+        }
+
+        private void NextendoDashboardResize_PointerMoved(object sender, PointerEventArgs e)
+        {
+            if (!_isResizingNextendoDashboard)
+            {
+                return;
+            }
+
+            Point current = e.GetPosition(this);
+            double maxWidth = Math.Clamp(NextendoDashboardOverlay.Bounds.Width - 48, 700, 2000);
+            double maxHeight = Math.Clamp(NextendoDashboardOverlay.Bounds.Height - 48, 400, 1400);
+            NextendoDashboardFrame.Width = Math.Clamp(_nextendoDashboardResizeWidth + current.X - _nextendoDashboardResizeStart.X, 700, maxWidth);
+            NextendoDashboardFrame.Height = Math.Clamp(_nextendoDashboardResizeHeight + current.Y - _nextendoDashboardResizeStart.Y, 400, maxHeight);
+            e.Handled = true;
+        }
+
+        private void NextendoDashboardOverlay_SizeChanged(object sender, SizeChangedEventArgs e)
+        {
+            if (double.IsNaN(NextendoDashboardFrame.Width) || double.IsNaN(NextendoDashboardFrame.Height))
+            {
+                return;
+            }
+
+            double maxWidth = Math.Clamp(e.NewSize.Width - 48, 700, 2000);
+            double maxHeight = Math.Clamp(e.NewSize.Height - 48, 400, 1400);
+            NextendoDashboardFrame.Width = Math.Min(NextendoDashboardFrame.Width, maxWidth);
+            NextendoDashboardFrame.Height = Math.Min(NextendoDashboardFrame.Height, maxHeight);
+        }
+
+        private void NextendoDashboardResize_PointerReleased(object sender, PointerReleasedEventArgs e)
+        {
+            if (_isResizingNextendoDashboard)
+            {
+                _isResizingNextendoDashboard = false;
+                ConfigurationState.Instance.UI.WindowStartup.NextendoDashboardWidth.Value = (int)Math.Round(NextendoDashboardFrame.Bounds.Width);
+                ConfigurationState.Instance.UI.WindowStartup.NextendoDashboardHeight.Value = (int)Math.Round(NextendoDashboardFrame.Bounds.Height);
+                MainWindowViewModel.SaveConfig();
+                e.Pointer.Capture(null);
+                e.Handled = true;
+            }
+        }
+
+        private void CloseNextendoDashboard()
+        {
+            _activeNextendoDashboard?.CancelPendingGameInvitation();
+            _activeNextendoDashboard = null;
+            Avalonia.Controls.Window gameDashboard = _nextendoGameDashboardWindow;
+            _nextendoGameDashboardWindow = null;
+            _nextendoGameDashboardFrame = null;
+            _nextendoDashboardTakesFocus = false;
+            gameDashboard?.Close();
+            NextendoDashboardOverlay.IsVisible = false;
+            NextendoDashboardContent.Content = null;
+            RestoreGameControllerInputAfterDashboard();
+        }
+
+        private void SuspendGameControllerInputForDashboard()
+        {
+            if (!ViewModel.IsGameRunning || ViewModel.AppHost is not { } host || host.NpadManager.InputUpdatesBlocked)
+            {
+                return;
+            }
+
+            host.NpadManager.BlockInputUpdates();
+            _dashboardBlockedGameInput = true;
+        }
+
+        private void RestoreGameControllerInputAfterDashboard()
+        {
+            if (!_dashboardBlockedGameInput)
+            {
+                return;
+            }
+
+            try
+            {
+                if (ViewModel.AppHost is { } host && host.NpadManager.InputUpdatesBlocked)
+                {
+                    host.NpadManager.UnblockInputUpdates();
+                }
+            }
+            catch (ObjectDisposedException)
+            {
+                // The game may have ended while the dashboard was open.
+            }
+            finally
+            {
+                _dashboardBlockedGameInput = false;
+            }
+        }
+
         public static bool ShowKeyErrorOnLoad { get; set; }
         public ApplicationLibrary ApplicationLibrary { get; set; }
 
@@ -88,7 +479,95 @@ namespace Ryujinx.Ava.UI.Windows
             InitializeComponent();
             Load();
 
+            // [Nextendo, HOME Menu work] The HOME Menu starting with the emulator, loaded in the
+            // background: the window stays invisible until the menu draws its first frame.
+            if (!_deferLoad && Ryujinx.Common.Configuration.NextendoHomeMenuSettings.AutoStart &&
+                Ryujinx.Common.Configuration.NextendoHomeMenuSettings.LoadInBackground)
+            {
+                HideUntilHomeMenu();
+            }
+
             UiHandler = new AvaHostUIHandler(this);
+
+            // [Nextendo, HOME Menu work] A nickname or icon changed from the user page of the HOME
+            // Menu goes to the Nextendo account first (the account is the source of truth): the
+            // same rule as the profile editor of the emulator.
+            // [Nextendo, HOME Menu work] "Link an account" on the console (user import): the
+            // Nextendo sign-in in the browser, and the picture of the account.
+            Ryujinx.Common.Configuration.NextendoAccountLink.SignIn = () => Ryujinx.Ava.Common.NextendoApi.SignInWithBrowserAsync();
+            Ryujinx.Common.Configuration.NextendoAccountLink.Picture = () =>
+            {
+                try
+                {
+                    using System.Net.Http.HttpClient http = new() { Timeout = TimeSpan.FromSeconds(10) };
+
+                    return http.GetByteArrayAsync($"{Ryujinx.Common.Configuration.NextendoEndpoint.Canonical.TrimEnd('/')}/api/avatar?pid={Ryujinx.Common.Configuration.NextendoAccount.Pid}").GetAwaiter().GetResult();
+                }
+                catch (Exception)
+                {
+                    return null;
+                }
+            };
+
+            Ryujinx.Ava.Systems.Updater.HookHomeMenuUpdate();
+
+            // [Nextendo] A game started from the HOME Menu gets its BCAT schedules synced like
+            // one started from the game list.
+            Ryujinx.Common.Configuration.NextendoHomeLaunch.BeforeStart = id => Avalonia.Threading.Dispatcher.UIThread.InvokeAsync(async () =>
+            {
+                DynamicData.Kernel.Optional<Ryujinx.Ava.Systems.AppLibrary.ApplicationData> found = ApplicationLibrary.Applications.Lookup(id);
+                Ryujinx.Ava.Systems.AppLibrary.ApplicationData app = found.HasValue ? found.Value : null;
+
+                if (app is { RequiresNextendoByaml: true })
+                {
+                    Logger.Info?.Print(LogClass.Application, $"[Nextendo] HOME Menu: BCAT of {app.Name} brought up to date before it starts");
+
+                    await Ryujinx.Ava.Common.NextendoByamlSync.EnsureUpToDateAsync(app);
+                }
+            });
+
+            Ryujinx.Common.Configuration.NextendoProfileEdits.Push = (userId, name, image) =>
+            {
+                if (!Ryujinx.Common.Configuration.NextendoAccount.IsLinked ||
+                    !string.Equals(userId, Ryujinx.Common.Configuration.NextendoAccount.ProfileUserId, StringComparison.OrdinalIgnoreCase))
+                {
+                    return true; // a local profile only
+                }
+
+                if (name != null)
+                {
+                    Task<(bool ok, string message)> renamed = Task.Run(() => Ryujinx.Ava.Common.NextendoApi.SetUsernameAsync(name));
+
+                    if (!renamed.Wait(TimeSpan.FromSeconds(10)) || !renamed.Result.ok)
+                    {
+                        Logger.Warning?.Print(LogClass.Application, $"[Nextendo] nickname from the HOME Menu refused: {(renamed.IsCompleted ? renamed.Result.message : "no answer")}");
+
+                        return false;
+                    }
+
+                    Ryujinx.Common.Configuration.NextendoAccount.Save(
+                        Ryujinx.Common.Configuration.NextendoAccount.Pid, name,
+                        Ryujinx.Common.Configuration.NextendoAccount.FriendCode,
+                        Ryujinx.Common.Configuration.NextendoAccount.NexToken,
+                        isGuest: Ryujinx.Common.Configuration.NextendoAccount.IsGuest);
+                }
+
+                if (image != null)
+                {
+                    Task<bool> pictured = Task.Run(() => Ryujinx.Ava.Common.NextendoApi.SetProfileImageAsync(image));
+
+                    if (!pictured.Wait(TimeSpan.FromSeconds(15)) || !pictured.Result)
+                    {
+                        Logger.Warning?.Print(LogClass.Application, "[Nextendo] icon from the HOME Menu refused by the account.");
+
+                        return false;
+                    }
+                }
+
+                Logger.Info?.Print(LogClass.Application, $"[Nextendo] profile edited from the HOME Menu sent to the account (name {(name ?? "unchanged")}, icon {(image != null ? "new" : "unchanged")}).");
+
+                return true;
+            };
 
             ViewModel.Title = RyujinxApp.FormatTitle();
 
@@ -146,6 +625,19 @@ namespace Ryujinx.Ava.UI.Windows
             // click-through window — the game render is a native surface that paints over Avalonia).
             NextendoNotificationOverlayWindow.Attach(this);
 
+            // [Nextendo] The notifications of the emulator drawn like the console's, over the
+            // picture of the running emulation; "update available" while the HOME Menu runs.
+            NextendoConsoleToasts.Target = () => ViewModel?.AppHost?.Device?.Gpu?.Window;
+            NextendoEventNotifications.Console = () => ViewModel?.AppHost?.Device;
+            Ryujinx.Ava.Systems.NextendoUpdateNotifier.Start();
+            NextendoEventNotifications.Initialize(() =>
+            {
+                if (ViewModel?.AppHost is { } host)
+                {
+                    host.ScreenshotRequested = true;
+                }
+            });
+
             // [Nextendo] L'historique ne partait qu'a la fin d'un jeu ou a la fermeture de la
             // fenetre : un emulateur tue ou plante n'envoyait donc rien, et une longue session
             // n'arrivait sur le compte qu'apres coup. Mesure du 2026-08-23 : un compte ayant joue
@@ -175,6 +667,33 @@ namespace Ryujinx.Ava.UI.Windows
                     {
                         await Ryujinx.Ava.Common.NextendoApi.TouchSessionAsync();
                         await System.Threading.Tasks.Task.Delay(System.TimeSpan.FromMinutes(2));
+                    }
+                });
+
+                // [Nextendo] Pseudo et photo du compte relus toutes les 5 min et recopies sur le
+                // profil local lie (rien n'est ecrit s'ils n'ont pas change). Les jeux lances depuis
+                // le menu HOME ne passent pas par la relecture faite avant chaque lancement : un
+                // pseudo change sur le site pendant la session restait l'ancien dans Mario Kart 8
+                // Deluxe, qui relit nn::account::GetNickname a chaque construction de son profil en
+                // ligne, jusqu'au redemarrage de l'emulateur.
+                _ = System.Threading.Tasks.Task.Run(async () =>
+                {
+                    while (true)
+                    {
+                        await System.Threading.Tasks.Task.Delay(System.TimeSpan.FromMinutes(5));
+
+                        if (Ryujinx.Common.Configuration.NextendoAccount.IsLinked
+                            && !Ryujinx.Common.Configuration.NextendoServerOverride.HorsNextendo)
+                        {
+                            try
+                            {
+                                await Ryujinx.Ava.Common.NextendoApi.GetProfileSyncAsync();
+                            }
+                            catch
+                            {
+                                // hors d'atteinte : nouvel essai au prochain tour
+                            }
+                        }
                     }
                 });
 
@@ -208,6 +727,22 @@ namespace Ryujinx.Ava.UI.Windows
         private void ApplicationLibrary_ApplicationCountUpdated(object sender, ApplicationCountUpdatedEventArgs e)
         {
             LocaleManager.Instance.UpdateAndGetDynamicValue(LocaleKeys.StatusBarGamesLoaded, e.NumAppsLoaded, e.NumAppsFound);
+
+            if (e.NumAppsLoaded == e.NumAppsFound)
+            {
+                // The library is complete: a running HOME Menu lists its titles again. The games
+                // reach the list on the interface thread: told once they are all there.
+                Dispatcher.UIThread.Post(() =>
+                {
+                    Ryujinx.HLE.HOS.HomeMenuLibrary.NotifyChanged();
+
+                    // [Nextendo] On the HOME Menu, a game never seen before is told.
+                    if (Ryujinx.HLE.HOS.HomeMenuStatus.Running)
+                    {
+                        TellNewGames();
+                    }
+                }, DispatcherPriority.Background);
+            }
 
             Dispatcher.UIThread.Post(() =>
             {
@@ -391,6 +926,234 @@ namespace Ryujinx.Ava.UI.Windows
             }
         }
 
+        /// <summary>
+        /// [Nextendo] Starts the HOME Menu of the installed firmware (system title 0100000000001000),
+        /// with the games of the library as the titles installed on that console.
+        /// </summary>
+        public void LaunchHomeMenu()
+        {
+            // The Nextendo additions are made for one firmware: with another one they are turned
+            // off for this start (the player's choice is kept), and the player is told first.
+            Ryujinx.HLE.FileSystem.SystemVersion firmware = ViewModel.ContentManager.GetCurrentFirmwareVersion();
+
+            Ryujinx.Common.Configuration.NextendoHomeMenuVanilla.Firmware = firmware == null ? "" : $"{firmware.Major}.{firmware.Minor}.{firmware.Micro}";
+
+            if (Ryujinx.Common.Configuration.NextendoHomeMenuVanilla.Forced)
+            {
+                Logger.Warning?.Print(LogClass.Application, $"HOME Menu: firmware {Ryujinx.Common.Configuration.NextendoHomeMenuVanilla.Firmware}, the Nextendo additions need {Ryujinx.Common.Configuration.NextendoHomeMenuVanilla.SupportedFirmware}: turned off.");
+
+                RevealAfterBackgroundLoad();
+
+                Dispatcher.UIThread.Post(async () =>
+                {
+                    await Ryujinx.Ava.UI.Helpers.ContentDialogHelper.CreateWarningDialog(
+                        LocaleManager.Instance[LocaleKeys.Dialog_Nextendo_HomeMenuName],
+                        LocaleManager.Instance[LocaleKeys.Dialog_Nextendo_HomeMenuOtherFirmware]
+                            .Replace("{0}", Ryujinx.Common.Configuration.NextendoHomeMenuVanilla.Firmware)
+                            .Replace("{1}", Ryujinx.Common.Configuration.NextendoHomeMenuVanilla.SupportedFirmware));
+
+                    LaunchHomeMenuNow();
+                });
+
+                return;
+            }
+
+            LaunchHomeMenuNow();
+        }
+
+        private void LaunchHomeMenuNow()
+        {
+            // The menu draws through the shared frame buffers of the system applets.
+            Environment.SetEnvironmentVariable("NEXTENDO_SHARED_FB", "1");
+
+            // The picture and name of the account onto the local profile BEFORE the menu starts:
+            // the menu keeps the first picture it is given for the whole session, so a picture
+            // changed on the website stayed old there (3 s at most, the menu starts anyway).
+            if (Ryujinx.Common.Configuration.NextendoAccount.IsLinked)
+            {
+                try
+                {
+                    System.Threading.Tasks.Task.Run(() => Ryujinx.Ava.Common.NextendoApi.GetProfileSyncAsync()).Wait(3000);
+                }
+                catch
+                {
+                    // out of reach: the local profile as it is
+                }
+            }
+
+            Ryujinx.Ava.Utilities.AppletMetadata homeMenu = new(ViewModel.ContentManager, LocaleManager.Instance[LocaleKeys.Dialog_Nextendo_HomeMenuName], 0x0100000000001000);
+            Logger.Notice.Print(LogClass.Application, $"[home-menu] resolving qlaunch, content path={homeMenu.GetContentPath(ViewModel.ContentManager)}");
+            // No firmware installed (or one without the menu): say so instead of going on.
+            if (string.IsNullOrEmpty(homeMenu.GetContentPath(ViewModel.ContentManager)))
+            {
+                Logger.Error?.Print(LogClass.Application, "HOME Menu: qlaunch not found in the installed firmware.");
+
+                RevealAfterBackgroundLoad();
+
+                _ = Ryujinx.Ava.UI.Helpers.ContentDialogHelper.CreateWarningDialog(
+                    LocaleManager.Instance[LocaleKeys.Dialog_Nextendo_HomeMenuName],
+                    LocaleManager.Instance[LocaleKeys.Dialog_Nextendo_HomeMenuNoFirmware]);
+
+                return;
+            }
+
+            if (homeMenu.CanStart(out ApplicationData homeMenuData, out LibHac.Common.BlitStruct<LibHac.Ns.ApplicationControlProperty> homeMenuNacp))
+            {
+                // Its own icon on the loading screen, not the generic NCA cartridge.
+                ViewModel.SelectedIcon = Ryujinx.Common.EmbeddedResources.Read("Ryujinx/Assets.UIImages.Icon_HomeMenu.png");
+                ViewModel.LoadIconRadius = new Avalonia.CornerRadius(36);
+
+                // The menu itself as a title: what the user's own page shows as
+                // "playing" while no game runs.
+                Ryujinx.Common.Configuration.NextendoGames.Remember(
+                    Ryujinx.Common.Configuration.NextendoGames.HomeMenuId, "Menu HOME", ViewModel.SelectedIcon);
+            }
+
+            // The games of the library are the titles "installed" on that console.
+            // A direct launch skips the library scan: the HOME Menu needs it.
+            if (!_applicationsLoadedOnce)
+            {
+                LoadApplications();
+            }
+
+            // [Nextendo] Games put in the folders while the emulator was closed are told once the
+            // HOME Menu shows; those put in while it runs, at once.
+            WatchGameFolders();
+
+            System.Threading.Tasks.Task.Delay(15000).ContinueWith(_ => Dispatcher.UIThread.Post(() =>
+            {
+                if (Ryujinx.HLE.HOS.HomeMenuStatus.Running)
+                {
+                    TellNewGames();
+                }
+            }));
+
+            Ryujinx.HLE.HOS.HomeMenuLibrary.SetProvider(() =>
+            {
+                List<Ryujinx.HLE.HOS.HomeMenuTitle> titles = [];
+
+                foreach (ApplicationData app in ViewModel.Applications.ToArray())
+                {
+                    if (app.Id < 0x0100000000010000 || string.IsNullOrEmpty(app.Path) || titles.Exists(t => t.Id == app.Id))
+                    {
+                        continue;
+                    }
+
+                    titles.Add(new Ryujinx.HLE.HOS.HomeMenuTitle
+                    {
+                        Id = app.Id,
+                        Name = app.Name,
+                        Path = app.Path,
+                        Icon = app.Icon,
+                        Nacp = app.HasControlHolder ? app.ControlHolder.ByteSpan.ToArray() : null,
+                        UpdatePath = ApplicationLibrary?.FindUpdateConfigurationFor(app.Id).FirstOrDefault(u => u.IsSelected).TitleUpdate?.Path,
+                        DlcPaths = ApplicationLibrary?.DownloadableContents.Items
+                            .Where(d => d.IsEnabled && d.Dlc.TitleIdBase == (app.Id & ~0x1FFFUL))
+                            .Select(d => d.Dlc.ContainerPath).Distinct().ToArray() ?? [],
+                    });
+                }
+
+                return titles;
+            });
+
+            Ryujinx.HLE.HOS.HomeMenuLibrary.Delete = title =>
+            {
+                bool deleted = Ryujinx.Ava.Systems.NextendoSoftwareDeletion.Delete(title);
+
+                // The game list is read again: the HOME Menu no longer shows the game.
+                Dispatcher.UIThread.Post(LoadApplications);
+
+                return deleted;
+            };
+
+            if (homeMenuData != null)
+                _ = ViewModel.LoadApplication(homeMenuData, _startFullscreen || Ryujinx.Common.Configuration.NextendoHomeMenuSettings.Fullscreen, homeMenuNacp);
+            else
+                Logger.Error?.Print(LogClass.Application, "HOME Menu: qlaunch not found in the installed firmware.");
+        }
+
+        private bool _hiddenUntilHomeMenu;
+
+        [System.Runtime.InteropServices.DllImport("user32.dll", EntryPoint = "GetWindowLongPtrW")]
+        private static extern nint GetWindowLongPtr(nint hWnd, int index);
+
+        [System.Runtime.InteropServices.DllImport("user32.dll", EntryPoint = "SetWindowLongPtrW")]
+        private static extern nint SetWindowLongPtr(nint hWnd, int index, nint value);
+
+        [System.Runtime.InteropServices.DllImport("user32.dll")]
+        private static extern bool SetLayeredWindowAttributes(nint hWnd, uint key, byte alpha, uint flags);
+
+        private const int GwlExStyle = -20;
+        private const nint WsExLayered = 0x80000;
+        private const nint WsExToolWindow = 0x80;
+
+        // Windows: the window is made fully transparent and kept off the taskbar from the start,
+        // so nothing of it shows before the menu. Elsewhere, its content is made transparent.
+        private void SetHiddenWhileLoading(bool hidden)
+        {
+            nint handle = OperatingSystem.IsWindows() ? (TryGetPlatformHandle()?.Handle ?? 0) : 0;
+
+            Opacity = hidden ? 0 : 1;
+
+            if (handle == 0)
+            {
+                return;
+            }
+
+            nint style = GetWindowLongPtr(handle, GwlExStyle);
+
+            if (hidden)
+            {
+                SetWindowLongPtr(handle, GwlExStyle, style | WsExLayered | WsExToolWindow);
+                SetLayeredWindowAttributes(handle, 0, 0, 2); // LWA_ALPHA
+            }
+            else
+            {
+                SetWindowLongPtr(handle, GwlExStyle, style & ~(WsExLayered | WsExToolWindow));
+            }
+        }
+
+        private void HideUntilHomeMenu()
+        {
+            _hiddenUntilHomeMenu = true;
+            SetHiddenWhileLoading(true);
+
+            // The window style is set again when the window shows or changes state (a maximised
+            // window does): the hiding is applied again until the menu is there.
+            Avalonia.Threading.DispatcherTimer keep = new() { Interval = TimeSpan.FromMilliseconds(50) };
+            keep.Tick += (_, _) =>
+            {
+                if (!_hiddenUntilHomeMenu)
+                {
+                    keep.Stop();
+
+                    return;
+                }
+
+                SetHiddenWhileLoading(true);
+            };
+            keep.Start();
+
+            // Never left invisible: shown after two minutes whatever happens.
+            _ = Task.Delay(TimeSpan.FromMinutes(2)).ContinueWith(_ => RevealAfterBackgroundLoad());
+        }
+
+        /// <summary>[Nextendo] Shows the window hidden while the HOME Menu loaded.</summary>
+        public void RevealAfterBackgroundLoad()
+        {
+            Dispatcher.UIThread.Post(() =>
+            {
+                if (!_hiddenUntilHomeMenu)
+                {
+                    return;
+                }
+
+                _hiddenUntilHomeMenu = false;
+                SetHiddenWhileLoading(false);
+                Activate();
+            });
+        }
+
         private async Task CheckLaunchState()
         {
             // [Nextendo] First-launch quick-start (fresh install) and the "what's new" popup (first
@@ -398,10 +1161,13 @@ namespace Ryujinx.Ava.UI.Windows
             // handle them together. A fresh install shows the wizard only; an existing install that
             // just updated shows the condensed patch notes once.
             bool firstRun = NextendoFirstRunWindow.IsFirstRun();
+            Logger.Notice.Print(LogClass.Application, $"[home-menu] CheckLaunchState: firstRun={firstRun} deferLoad={_deferLoad} path={_launchPath} keyError={ShowKeyErrorOnLoad}");
             bool showPatchNotes = !firstRun && Ryujinx.Ava.Common.NextendoPatchNotes.ShouldShow();
 
             if (firstRun || showPatchNotes)
             {
+                RevealAfterBackgroundLoad();
+
                 await Dispatcher.UIThread.InvokeAsync(async () =>
                 {
                     try
@@ -462,13 +1228,27 @@ namespace Ryujinx.Ava.UI.Windows
                 }
             }
 
+            Logger.Notice.Print(LogClass.Application, "[home-menu] startup popups done");
             if (!ShowKeyErrorOnLoad)
             {
+                // [Nextendo, HOME Menu work] "Start the HOME Menu with the emulator".
+                if (!_deferLoad && Ryujinx.Common.Configuration.NextendoHomeMenuSettings.AutoStart)
+                {
+                    await Dispatcher.UIThread.InvokeAsync(LaunchHomeMenu);
+                }
+
                 if (_deferLoad)
                 {
                     _deferLoad = false;
 
-                    if (ApplicationLibrary.TryGetApplicationsFromFile(_launchPath, out List<ApplicationData> applications))
+                    // [Nextendo, HOME Menu work] "@home-menu" boots qlaunch (system title
+                    // 0100000000001000) from the installed firmware, the way the Mii editor is.
+                    // Development entry point only: there is no menu item for it.
+                    if (_launchPath == "@home-menu")
+                    {
+                        LaunchHomeMenu();
+                    }
+                    else if (ApplicationLibrary.TryGetApplicationsFromFile(_launchPath, out List<ApplicationData> applications))
                     {
                         ApplicationData applicationData;
 
@@ -594,6 +1374,12 @@ namespace Ryujinx.Ava.UI.Windows
         protected override void OnOpened(EventArgs e)
         {
             base.OnOpened(e);
+
+            // The window style is set again on show: the hiding is applied once it is there.
+            if (_hiddenUntilHomeMenu)
+            {
+                SetHiddenWhileLoading(true);
+            }
 
             Initialize();
 
@@ -763,6 +1549,73 @@ namespace Ryujinx.Ava.UI.Windows
                     Close();
                 }
             });
+        }
+
+        // [Nextendo, HOME Menu work] The games of the library never seen before, told as notifications.
+        private void TellNewGames()
+        {
+            List<(ulong, string, byte[])> titles = ViewModel.Applications.ToArray()
+                .Where(app => app.Id >= 0x0100000000010000)
+                .Select(app => (app.Id, app.Name, app.Icon))
+                .ToList();
+
+            System.Threading.Tasks.Task.Run(() => NextendoEventNotifications.LibraryLoaded(titles));
+        }
+
+        // [Nextendo, HOME Menu work] While the HOME Menu runs, a game put in a game folder is added
+        // at once: the library is read again (the HOME Menu then lists it) and the game is told.
+        private readonly List<System.IO.FileSystemWatcher> _gameFolderWatchers = [];
+        private System.Threading.Timer _gameFolderSettle;
+
+        private void WatchGameFolders()
+        {
+            if (_gameFolderWatchers.Count > 0)
+            {
+                return;
+            }
+
+            foreach (string folder in ConfigurationState.Instance.UI.GameDirs.Value ?? [])
+            {
+                if (!System.IO.Directory.Exists(folder))
+                {
+                    continue;
+                }
+
+                try
+                {
+                    System.IO.FileSystemWatcher watcher = new(folder)
+                    {
+                        IncludeSubdirectories = true,
+                        NotifyFilter = System.IO.NotifyFilters.FileName | System.IO.NotifyFilters.Size,
+                    };
+
+                    System.IO.FileSystemEventHandler changed = (_, e) => GameFileChanged(e.FullPath);
+
+                    watcher.Created += changed;
+                    watcher.Renamed += (_, e) => GameFileChanged(e.FullPath);
+                    watcher.EnableRaisingEvents = true;
+
+                    _gameFolderWatchers.Add(watcher);
+                }
+                catch (Exception e)
+                {
+                    Logger.Warning?.Print(LogClass.Application, $"[Nextendo] game folder not watched ({folder}): {e.Message}");
+                }
+            }
+        }
+
+        private void GameFileChanged(string path)
+        {
+            string extension = System.IO.Path.GetExtension(path).ToLowerInvariant();
+
+            if (extension is not (".nsp" or ".xci" or ".nsz" or ".xcz" or ".nro" or ".nca") || !Ryujinx.HLE.HOS.HomeMenuStatus.Running)
+            {
+                return;
+            }
+
+            // A copy in progress fires many times: read once it has settled.
+            _gameFolderSettle?.Dispose();
+            _gameFolderSettle = new System.Threading.Timer(_ => Dispatcher.UIThread.Post(LoadApplications), null, 4000, System.Threading.Timeout.Infinite);
         }
 
         public void LoadApplications()
@@ -953,6 +1806,13 @@ namespace Ryujinx.Ava.UI.Windows
 
         private void AppWindow_OnLostFocus(object sender, RoutedEventArgs e)
         {
+            // Showing the owned dashboard window moves keyboard focus away from this host,
+            // but it must not trigger Ryujinx's configured focus-loss pause/mute action.
+            if (_nextendoDashboardTakesFocus)
+            {
+                return;
+            }
+
             if (ConfigurationState.Instance.FocusLostActionType.Value is FocusLostType.DoNothing)
                 return;
 

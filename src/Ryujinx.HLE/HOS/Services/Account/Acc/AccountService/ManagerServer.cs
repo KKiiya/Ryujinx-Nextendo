@@ -54,6 +54,9 @@ namespace Ryujinx.HLE.HOS.Services.Account.Acc.AccountService
         private DateTime _cachedTokenExpiry;
         private string _cachedTokenVersion;
         private ulong _cachedTokenProgramId;
+        private bool _cachedOnlineIdentity;
+        private bool _cachedOnlineBlocked;
+        private string _cachedNexToken;
 
         public ManagerServer(UserId userId)
         {
@@ -102,7 +105,7 @@ namespace Ryujinx.HLE.HOS.Services.Account.Acc.AccountService
             return rsa;
         }
 
-        private static string GenerateIdToken(string installedVersion, ulong programId)
+        private string GenerateIdToken(string installedVersion, ulong programId)
         {
             RSAParameters parameters = _nextendoIdTokenRsa.ExportParameters(true);
 
@@ -129,7 +132,7 @@ namespace Ryujinx.HLE.HOS.Services.Account.Acc.AccountService
                 { "sn", "XAW10000000000" },
                 { "bs:did", Convert.ToHexString(deviceAccountId).ToLower() },
                 // NSO membership flag — Splatoon 2 reads this LOCALLY to gate online entry.
-                { "hm", true },
+                { "hm", !NextendoAccount.OnlineBlocked },
             };
 
             // Scarlet shares Violet's NPLN tenant but needs its own app_id.
@@ -148,7 +151,8 @@ namespace Ryujinx.HLE.HOS.Services.Account.Acc.AccountService
             // server holds) along in a custom "nnex" claim. The auth server validates that
             // HMAC and rejects any PID the token doesn't prove. Present only when a Nextendo
             // account is linked (online); absent otherwise, so offline is completely unaffected.
-            string nexToken = NextendoAccount.NexToken;
+            string nexToken = NextendoAccount.IsLinked && !NextendoAccount.OnlineBlocked && IsBoundNextendoProfile
+                ? NextendoAccount.NexToken : "";
             if (!string.IsNullOrEmpty(nexToken))
             {
                 claims["nnex"] = nexToken;
@@ -222,6 +226,13 @@ namespace Ryujinx.HLE.HOS.Services.Account.Acc.AccountService
 
             Logger.Stub?.PrintStub(LogClass.ServiceAcc);
 
+            // Le jeu passe en ligne : le pays du compte sera demandé juste après (informations du
+            // compte Nintendo), on le demande au site dès maintenant, sans attendre.
+            if (IsBoundNextendoProfile)
+            {
+                NextendoCountry.Prepare();
+            }
+
             // TODO: Use a real function instead, with the CancellationToken.
             await Task.CompletedTask;
         }
@@ -229,9 +240,7 @@ namespace Ryujinx.HLE.HOS.Services.Account.Acc.AccountService
         public ResultCode LoadIdTokenCache(ServiceCtx context)
         {
             ulong bufferPosition = context.Request.ReceiveBuff[0].Position;
-#pragma warning disable IDE0059 // Remove unnecessary value assignment
             ulong bufferSize = context.Request.ReceiveBuff[0].Size;
-#pragma warning restore IDE0059
 
             // NOTE: This opens the file at "su/cache/USERID_IN_UUID_STRING.dat" (where USERID_IN_UUID_STRING is formatted as "%08x-%04x-%04x-%02x%02x-%08x%04x")
             //       in the "account:/" savedata and writes some data in the buffer.
@@ -249,34 +258,86 @@ namespace Ryujinx.HLE.HOS.Services.Account.Acc.AccountService
             }
             */
 
-            string installedVersion = context.Device.Processes.ActiveApplication?.DisplayVersion;
-            ulong programId = context.Device.Processes.ActiveApplication?.ProgramId ?? 0;
+            byte[] tokenData = GetIdToken(context);
 
-            if (_cachedTokenData == null || DateTime.UtcNow > _cachedTokenExpiry ||
-                installedVersion != _cachedTokenVersion || programId != _cachedTokenProgramId)
-            {
-                _cachedTokenExpiry = DateTime.UtcNow + TimeSpan.FromHours(3);
-                _cachedTokenVersion = installedVersion;
-                _cachedTokenProgramId = programId;
-                _cachedTokenData = Encoding.ASCII.GetBytes(GenerateIdToken(installedVersion, programId));
-            }
+            // Titles read the token as a C string, so zero the rest of their buffer instead of leaving stale bytes after it.
+            byte[] output = new byte[Math.Max((ulong)tokenData.Length, bufferSize)];
+            tokenData.CopyTo(output, 0);
 
-            byte[] tokenData = _cachedTokenData;
-
-            context.Memory.Write(bufferPosition, tokenData);
+            context.Memory.Write(bufferPosition, output);
             context.ResponseData.Write(tokenData.Length);
 
             return ResultCode.Success;
         }
 
+        public byte[] GetIdToken(ServiceCtx context)
+        {
+            string installedVersion = context.Device.Processes.ActiveApplication?.DisplayVersion;
+            ulong programId = context.Device.Processes.ActiveApplication?.ProgramId ?? 0;
+
+            return GetIdTokenData(installedVersion, programId);
+        }
+
+        public ResultCode CreateAuthorizationRequest(ServiceCtx context, out IAuthorizationRequest authorizationRequest)
+        {
+            // In: u32 transfer-memory size, transfer-memory handle, 0x200-byte parameters buffer.
+            (ulong parametersPosition, ulong parametersSize) = context.Request.GetBufferType0x21();
+
+            byte[] parameters = new byte[parametersSize];
+            context.Memory.Read(parametersPosition, parameters);
+
+            authorizationRequest = new IAuthorizationRequest(this, parameters, parametersPosition);
+
+            return ResultCode.Success;
+        }
+
+        private byte[] GetIdTokenData(string installedVersion, ulong programId)
+        {
+            bool onlineIdentity = NextendoAccount.IsLinked && !NextendoAccount.OnlineBlocked && IsBoundNextendoProfile;
+            if (_cachedTokenData == null || DateTime.UtcNow > _cachedTokenExpiry ||
+                installedVersion != _cachedTokenVersion || programId != _cachedTokenProgramId ||
+                onlineIdentity != _cachedOnlineIdentity ||
+                NextendoAccount.OnlineBlocked != _cachedOnlineBlocked ||
+                NextendoAccount.NexToken != _cachedNexToken)
+            {
+                _cachedTokenExpiry = DateTime.UtcNow + TimeSpan.FromHours(3);
+                _cachedTokenVersion = installedVersion;
+                _cachedTokenProgramId = programId;
+                _cachedOnlineIdentity = onlineIdentity;
+                _cachedOnlineBlocked = NextendoAccount.OnlineBlocked;
+                _cachedNexToken = NextendoAccount.NexToken;
+                _cachedTokenData = Encoding.ASCII.GetBytes(GenerateIdToken(installedVersion, programId));
+            }
+
+            return _cachedTokenData;
+
+        }
+
         public ResultCode GetNintendoAccountUserResourceCacheForApplication(ServiceCtx context)
         {
-            Logger.Stub?.PrintStub(LogClass.ServiceAcc, new { NetworkServiceAccountId });
+            // NasUserBase is a fixed 0x1a output pointer (C/X), not the B resource buffer.
+            ResultCode result = CachedAccountInfo.PrepareResponse(context.Request, context.Response,
+                context.OutputPointerBufferAddress, context.OutputPointerBufferSize);
+            if (result != ResultCode.Success)
+            {
+                Logger.Warning?.Print(LogClass.ServiceAcc, "[Nextendo account cache] Invalid output buffers.");
+                return result;
+            }
+
+            // Pays du compte Nextendo, seulement pour le profil lié au compte (les autres profils
+            // locaux restent sans pays, comme leur identité reste le bouchon 0xcafe).
+            string country = NextendoAccount.IsLinked && IsBoundNextendoProfile ? NextendoCountry.Get() : "";
+
+            context.Memory.Write(context.OutputPointerBufferAddress, CachedAccountInfo.Create(country));
+            if (context.Request.ReceiveBuff.Count > 0)
+            {
+                var resource = context.Request.ReceiveBuff[0];
+                context.Memory.Fill(resource.Position, resource.Size, 0);
+            }
 
             context.ResponseData.Write(NetworkServiceAccountId);
-
-            // TODO: determine and fill the output IPC buffer.
-
+            Logger.Info?.Print(LogClass.ServiceAcc,
+                $"[Nextendo account cache] Returned 0x68-byte user base; shared birthday=2000-01-01; country {(country.Length == 2 ? "set" : "empty")}.");
             return ResultCode.Success;
         }
 

@@ -50,11 +50,43 @@ namespace Ryujinx.Ava.UI.Views.Main
             StopEmulationMenuItem.Command = Commands.Create(() => ViewModel.AppHost?.ShowExitPrompt().OrCompleted());
             RestartEmulationMenuItem.Command = Commands.Create(() => ViewModel.RestartEmulation());
             XCITrimmerMenuItem.Command = Commands.Create(XciTrimmerView.Show);
+            HomeMenuMenuItem.Command = Commands.Create(() => Window?.LaunchHomeMenu());
+            // [Nextendo, diagnostics] Where every thread of the console is, written to the log.
+            NextendoDiagnosticMenuItem.Command = Commands.Create(() =>
+            {
+                // the device read here (the interface's thread), the threads written elsewhere
+                var device = ViewModel.AppHost?.Device;
+
+                if (device != null)
+                {
+                    System.Threading.Tasks.Task.Run(device.DumpGuestThreads);
+                }
+            });
             NextendoLoginMenuItem.Command = Commands.Create(OpenNextendoAccount);
-            NextendoFriendsMenuItem.Command = Commands.Create(NextendoFriendsWindow.Open);
+            NextendoHomeMenuSettingsMenuItem.Command = Commands.Create(NextendoHomeMenuWindow.Open);
+            // Avec plusieurs comptes Nextendo, on demande d'abord lequel (comme une console).
+            NextendoFriendsMenuItem.Command = Commands.Create(async () =>
+            {
+                if (await NextendoAccountPicker.EnsureChosen(Window))
+                {
+                    NextendoFriendsWindow.Open();
+                }
+            });
             // Deux entrees, une seule fenetre : elle s ouvre sur l onglet demande.
-            NextendoLobbyMenuItem.Command = Commands.Create(() => NextendoLobbyWindow.Open(0));
-            NextendoRecentMenuItem.Command = Commands.Create(() => NextendoLobbyWindow.Open(1));
+            NextendoLobbyMenuItem.Command = Commands.Create(async () =>
+            {
+                if (await NextendoAccountPicker.EnsureChosen(Window))
+                {
+                    NextendoLobbyWindow.Open(0);
+                }
+            });
+            NextendoRecentMenuItem.Command = Commands.Create(async () =>
+            {
+                if (await NextendoAccountPicker.EnsureChosen(Window))
+                {
+                    NextendoLobbyWindow.Open(1);
+                }
+            });
             NextendoReportMenuItem.Command = Commands.Create(() => NextendoReportWindow.Open());
             AboutWindowMenuItem.Command = Commands.Create(AboutView.Show);
             CompatibilityListMenuItem.Command = Commands.Create(() => CompatibilityListWindow.Show());
@@ -64,7 +96,10 @@ namespace Ryujinx.Ava.UI.Views.Main
 
             FaqMenuItem.Command =
                 SetupGuideMenuItem.Command =
-                    LdnGuideMenuItem.Command = Commands.Create<string>(OpenHelper.OpenUrl);
+                    LdnGuideMenuItem.Command =
+                        NextendoWikiMenuItem.Command =
+                            NextendoWebsiteMenuItem.Command =
+                                NextendoDiscordMenuItem.Command = Commands.Create<string>(OpenHelper.OpenUrl);
 
             WindowSize720PMenuItem.Command =
                 WindowSize1080PMenuItem.Command =
@@ -369,7 +404,9 @@ namespace Ryujinx.Ava.UI.Views.Main
             //    RENAME the currently-active local profile instead of spawning a duplicate, so the
             //    Profile Manager + in-game identity become the chosen pseudo (e.g. "RyuPlayer" -> "Player").
             Ryujinx.HLE.HOS.Services.Account.Acc.UserProfile bound = FindBoundProfile(am);
-            if (bound == null && reuseActiveProfile)
+            // (never the profile of another connected Nextendo account: it would be renamed away)
+            if (bound == null && reuseActiveProfile && am.LastOpenedUser != null &&
+                !NextendoAccount.BelongsToOtherAccount(am.LastOpenedUser.UserId.ToString()))
             {
                 bound = am.LastOpenedUser;
             }
@@ -498,9 +535,52 @@ namespace Ryujinx.Ava.UI.Views.Main
         {
             if (NextendoAccount.IsLinked)
             {
-                await ShowNextendoAccountPanel();
-                return;
+                // Plusieurs comptes : on choisit d'abord lequel (ou d'en ajouter un).
+                if (NextendoAccount.Count > 1)
+                {
+                    ulong? chosen = await NextendoAccountPicker.Pick(Window, allowAdd: true);
+
+                    if (chosen == null)
+                    {
+                        return;
+                    }
+
+                    if (chosen != NextendoAccountPicker.AddAccount)
+                    {
+                        await AccountPanelThen();
+                        return;
+                    }
+                }
+                else if (await ShowNextendoAccountPanel() != PanelNext.Add)
+                {
+                    return;
+                }
             }
+
+            await SignInNextendoAccount();
+        }
+
+        // What the account panel asks for once it closes.
+        private enum PanelNext { None, Add, Switch }
+
+        private async Task AccountPanelThen()
+        {
+            switch (await ShowNextendoAccountPanel())
+            {
+                case PanelNext.Add:
+                    await SignInNextendoAccount();
+                    break;
+                case PanelNext.Switch:
+                    await OpenNextendoAccount();
+                    break;
+            }
+        }
+
+        // Browser sign-in of a Nextendo account. With an account already here, the new one is
+        // ADDED (the site's consent page has "Not you? Switch account"); signing in again with an
+        // account already here just refreshes it.
+        private async Task SignInNextendoAccount()
+        {
 
             // [Nextendo] Sign in through the browser (OAuth loopback + PKCE) — the emulator never
             // handles the e-mail/password. Opens nextendo.network, waits for the loopback callback,
@@ -555,7 +635,7 @@ namespace Ryujinx.Ava.UI.Views.Main
                         $"[Nextendo] account profile bind failed: {ex.Message}");
                 }
 
-                await ShowNextendoAccountPanel();
+                await AccountPanelThen();
             }
             else if (!string.IsNullOrEmpty(error))
             {
@@ -564,8 +644,10 @@ namespace Ryujinx.Ava.UI.Views.Main
         }
 
         // Settings panel shown when a Nextendo account is already linked.
-        private async Task ShowNextendoAccountPanel()
+        private async Task<PanelNext> ShowNextendoAccountPanel()
         {
+            PanelNext next = PanelNext.None;
+
             // Profile photo — the same picture the website and your friends see of you.
             byte[] avatar = null;
             try { (_, avatar) = await Ryujinx.Ava.Common.NextendoApi.GetProfileSyncAsync(); } catch { /* cosmetic */ }
@@ -586,6 +668,23 @@ namespace Ryujinx.Ava.UI.Views.Main
                 },
             };
 
+            ContentDialog dialog = null;
+
+            // Plusieurs comptes Nextendo dans un emulateur : en ajouter un, ou passer a un autre.
+            StackPanel accounts = new() { Orientation = Avalonia.Layout.Orientation.Horizontal, Spacing = 8 };
+            Button addAccount = new() { Content = LocaleManager.Instance[LocaleKeys.Dialog_Nextendo_AccountPickerAdd] };
+            addAccount.Click += (_, _) => { next = PanelNext.Add; dialog?.Hide(); };
+            accounts.Children.Add(addAccount);
+
+            if (NextendoAccount.Count > 1)
+            {
+                Button switchAccount = new() { Content = LocaleManager.Instance[LocaleKeys.Dialog_Nextendo_AccountPanelSwitchAccount] };
+                switchAccount.Click += (_, _) => { next = PanelNext.Switch; dialog?.Hide(); };
+                accounts.Children.Add(switchAccount);
+            }
+
+            panel.Children.Insert(panel.Children.IndexOf(status), accounts);
+
             if (avatar is { Length: > 0 })
             {
                 panel.Children.Insert(0, new Avalonia.Controls.Border
@@ -603,7 +702,7 @@ namespace Ryujinx.Ava.UI.Views.Main
                 });
             }
 
-            ContentDialog dialog = new()
+            dialog = new()
             {
                 Title = LocaleManager.Instance[LocaleKeys.Dialog_Nextendo_AccountPanelDialogTitle],
                 Content = panel,
@@ -654,6 +753,8 @@ namespace Ryujinx.Ava.UI.Views.Main
             };
 
             await ContentDialogHelper.ShowAsync(dialog);
+
+            return next;
         }
 
         // Login dialog shown when no Nextendo account is linked.

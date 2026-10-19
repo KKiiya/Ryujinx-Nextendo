@@ -8,12 +8,41 @@ namespace Ryujinx.HLE.HOS.Services.Am.AppletAE.AllSystemAppletProxiesService.Sys
 {
     class IDisplayController : IpcService
     {
+        // [Nextendo, HOME Menu work] No capture of the screen is kept.
+        [CommandCmif(5)]
+        // GetLastForegroundCaptureImageEx(buffer<bytes, 6>) -> bool
+        public ResultCode GetLastForegroundCaptureImageEx(ServiceCtx context)
+        {
+            context.ResponseData.Write(false);
+
+            return ResultCode.Success;
+        }
+
+        [CommandCmif(7)]
+        // GetCallerAppletCaptureImageEx(buffer<bytes, 6>) -> bool
+        public ResultCode GetCallerAppletCaptureImageEx(ServiceCtx context)
+        {
+            context.ResponseData.Write(false);
+
+            return ResultCode.Success;
+        }
+
+        [CommandCmif(20)] // 3.0.0+
+        // ClearCaptureBuffer(bool, s32 buffer, u32 color)
+        public ResultCode ClearCaptureBuffer(ServiceCtx context)
+        {
+            return ResultCode.Success;
+        }
+
         private readonly KTransferMemory _transferMem;
         private bool _lastApplicationCaptureBufferAcquired;
         private bool _callerAppletCaptureBufferAcquired;
 
-        public IDisplayController(ServiceCtx context)
+        private readonly ulong _pid;
+
+        public IDisplayController(ServiceCtx context, ulong pid = 0)
         {
+            _pid = pid;
             _transferMem = context.Device.System.AppletCaptureBufferTransfer;
         }
 
@@ -21,10 +50,13 @@ namespace Ryujinx.HLE.HOS.Services.Am.AppletAE.AllSystemAppletProxiesService.Sys
         // TakeScreenShotOfOwnLayer(b8, s32)
         public ResultCode TakeScreenShotOfOwnLayer(ServiceCtx context)
         {
-            bool unknown1 = context.RequestData.ReadBoolean();
-            int unknown2 = context.RequestData.ReadInt32();
+            // (bool, s32) with the s32 aligned: 0 last application, 1 last foreground, 2 caller applet.
+            int flags = context.RequestData.ReadInt32();
+            int captureIndex = context.RequestData.ReadInt32();
 
-            Logger.Stub?.PrintStub(LogClass.ServiceAm, new { unknown1, unknown2 });
+            _ = flags;
+
+            Ryujinx.HLE.HOS.Services.Vi.SystemSharedBuffer.Capture(_pid, captureIndex);
 
             return ResultCode.Success;
         }
@@ -102,5 +134,40 @@ namespace Ryujinx.HLE.HOS.Services.Am.AppletAE.AllSystemAppletProxiesService.Sys
 
             return ResultCode.Success;
         }
+        // [Nextendo, HOME Menu work] The captures as slots of the shared frame buffer pool: what
+        // an applet draws, blurred, behind its own window.
+        private ResultCode AcquireCaptureSharedBuffer(ServiceCtx context, int captureIndex)
+        {
+            int slot = Ryujinx.HLE.HOS.Services.Vi.SystemSharedBuffer.PlaceCapture(context, _pid, captureIndex);
+
+            context.ResponseData.Write(slot >= 0 ? 1 : 0); // the capture may be shown
+            context.ResponseData.Write(slot >= 0 ? slot : 0);
+
+            return ResultCode.Success;
+        }
+
+        [CommandCmif(22)] // 4.0.0+
+        // AcquireLastApplicationCaptureSharedBuffer() -> (b8, s32)
+        public ResultCode AcquireLastApplicationCaptureSharedBuffer(ServiceCtx context) => AcquireCaptureSharedBuffer(context, 0);
+
+        [CommandCmif(23)] // 4.0.0+
+        // ReleaseLastApplicationCaptureSharedBuffer()
+        public ResultCode ReleaseLastApplicationCaptureSharedBuffer(ServiceCtx context) => ResultCode.Success;
+
+        [CommandCmif(24)] // 4.0.0+
+        // AcquireLastForegroundCaptureSharedBuffer() -> (b8, s32)
+        public ResultCode AcquireLastForegroundCaptureSharedBuffer(ServiceCtx context) => AcquireCaptureSharedBuffer(context, 1);
+
+        [CommandCmif(25)] // 4.0.0+
+        // ReleaseLastForegroundCaptureSharedBuffer()
+        public ResultCode ReleaseLastForegroundCaptureSharedBuffer(ServiceCtx context) => ResultCode.Success;
+
+        [CommandCmif(26)] // 4.0.0+
+        // AcquireCallerAppletCaptureSharedBuffer() -> (b8, s32)
+        public ResultCode AcquireCallerAppletCaptureSharedBuffer(ServiceCtx context) => AcquireCaptureSharedBuffer(context, 2);
+
+        [CommandCmif(27)] // 4.0.0+
+        // ReleaseCallerAppletCaptureSharedBuffer()
+        public ResultCode ReleaseCallerAppletCaptureSharedBuffer(ServiceCtx context) => ResultCode.Success;
     }
 }

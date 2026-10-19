@@ -37,9 +37,16 @@ namespace Ryujinx.Ava.Common
         // base dir is always writable (and portable-mode aware).
         private const string VioletTitleId = "01008f6008c5e000";
         private const string ScarletTitleId = "0100a3d008c5c000";
+        private const string LegendsZaTitleId = "0100f43008c44000";
+        private const string SwitchSportsTitleId = "0100d2f00d5c0000";
+        private const string SwordTitleId = "0100abf008968000";
+        private const string ShieldTitleId = "01008db008c2c000";
+        private const string SmashUltimateTitleId = "01006a800016e000";
         private static string SeedRoot => Path.Combine(AppDataManager.BaseDirPath, "bcat-seed");
+        // Titles whose BCAT is a plain package installed into its own seed folder.
         private static bool IsPokemon(ApplicationData app) => app?.IdBaseString is
-            VioletTitleId or ScarletTitleId;
+            VioletTitleId or ScarletTitleId or LegendsZaTitleId or SwitchSportsTitleId or
+            SwordTitleId or ShieldTitleId or SmashUltimateTitleId;
         private static string PokemonSeedRoot(ApplicationData app) => Path.Combine(SeedRoot, app.IdBaseString);
 
         // [Nextendo] Legacy next-to-exe seed location REMOVED: it let a stale copy shadow the live
@@ -55,6 +62,12 @@ namespace Ryujinx.Ava.Common
             if (app == null)
             {
                 return false;
+            }
+
+            if (app.IdBaseString == Ryujinx.Common.NextendoSplatoon3Bcat.TitleId)
+            {
+                return Ryujinx.Common.NextendoSplatoon3Bcat.IsInstalled(
+                    Path.Combine(SeedRoot, Ryujinx.Common.NextendoSplatoon3Bcat.TitleId));
             }
 
             if (IsPokemon(app))
@@ -131,6 +144,11 @@ namespace Ryujinx.Ava.Common
             if (app == null || !RequiresByaml(app))
             {
                 return false;
+            }
+
+            if (app.IdBaseString == Ryujinx.Common.NextendoSplatoon3Bcat.TitleId)
+            {
+                return await EnsureSplatoon3BcatAsync();
             }
 
             if (IsPokemon(app))
@@ -277,6 +295,11 @@ namespace Ryujinx.Ava.Common
                 return false;
             }
 
+            if (app.IdBaseString == Ryujinx.Common.NextendoSplatoon3Bcat.TitleId)
+            {
+                return await EnsureSplatoon3BcatAsync(force: true);
+            }
+
             if (IsPokemon(app))
             {
                 return await EnsurePokemonBcatAsync(app, force: true);
@@ -361,6 +384,33 @@ namespace Ryujinx.Ava.Common
             await dialog.ShowAsync(true);
             return ok;
         }
+
+        private static async Task<bool> EnsureSplatoon3BcatAsync(bool force = false)
+        {
+            try
+            {
+                using HttpClient http = new() { Timeout = TimeSpan.FromSeconds(60) };
+                NextendoApi.AddAppHeader(http);
+                if (!string.IsNullOrEmpty(NextendoAccount.NexToken))
+                {
+                    http.DefaultRequestHeaders.Add("Authorization", "Bearer " + NextendoAccount.NexToken);
+                }
+                bool changed = await Ryujinx.Common.NextendoSplatoon3Bcat.SyncAsync(http, BaseUrl(), SeedRoot, force);
+                Logger.Info?.Print(LogClass.Application, changed
+                    ? "[Nextendo] Splatoon 3 BCAT updated from server."
+                    : "[Nextendo] Splatoon 3 BCAT is current.");
+                return changed || (force && IsInstalledForSplatoon3());
+            }
+            catch (Exception ex)
+            {
+                Logger.Warning?.Print(LogClass.Application,
+                    $"[Nextendo] Splatoon 3 BCAT update failed; retaining local cache: {ex.Message}");
+                return false;
+            }
+        }
+
+        private static bool IsInstalledForSplatoon3() => Ryujinx.Common.NextendoSplatoon3Bcat.IsInstalled(
+            Path.Combine(SeedRoot, Ryujinx.Common.NextendoSplatoon3Bcat.TitleId));
 
         private static async Task<HttpResponseMessage> GetPokemonBcatResponseAsync(HttpClient http, string titleId)
         {

@@ -27,6 +27,51 @@ namespace Ryujinx.HLE.HOS.Services.Fs
     [Service("fsp-srv")]
     class IFileSystemProxy : DisposableIpcService
     {
+        // [Nextendo, HOME Menu work]
+        [CommandCmif(83)] // 6.0.0+
+        // OpenSaveDataTransferProhibiter(u64 application_id) -> object<nn::fssrv::sf::ISaveDataTransferProhibiter>
+        public ResultCode OpenSaveDataTransferProhibiter(ServiceCtx context)
+        {
+            context.RequestData.ReadUInt64();
+
+            MakeObject(context, new ISaveDataTransferProhibiter());
+
+            return ResultCode.Success;
+        }
+
+        [CommandCmif(201)] // 3.0.0+
+        // OpenDataStorageByProgramId(u64 program_id) -> object<nn::fssrv::sf::IStorage>: the data of
+        // a program of the system.
+        public ResultCode OpenDataStorageByProgramId(ServiceCtx context)
+        {
+            ulong programId = context.RequestData.ReadUInt64();
+
+            string contentPath = context.Device.System.ContentManager.GetInstalledContentPath(programId, StorageId.BuiltInSystem, NcaContentType.Program);
+            string ncaPath = string.IsNullOrEmpty(contentPath) ? null : FileSystem.VirtualFileSystem.SwitchPathToSystemPath(contentPath);
+
+            if (ncaPath == null || !File.Exists(ncaPath))
+            {
+                return (ResultCode)ResultFs.TargetNotFound.Value.Value;
+            }
+
+            try
+            {
+                LibHac.Fs.IStorage ncaStorage = new LocalStorage(ncaPath, FileAccess.Read, FileMode.Open);
+                Nca nca = new(context.Device.System.KeySet, ncaStorage);
+                LibHac.Fs.IStorage romfsStorage = context.Device.FileSystem.ModLoader.ApplyRomFsMods(programId, nca.OpenStorage(NcaSectionType.Data, context.Device.System.FsIntegrityCheckLevel));
+                using SharedRef<LibHac.Fs.IStorage> sharedStorage = new(romfsStorage);
+                using SharedRef<IStorage> sfStorage = new(new StorageInterfaceAdapter(ref sharedStorage.Ref));
+
+                MakeObject(context, new FileSystemProxy.IStorage(ref sfStorage.Ref));
+            }
+            catch (HorizonResultException ex)
+            {
+                return (ResultCode)ex.ResultValue.Value;
+            }
+
+            return ResultCode.Success;
+        }
+
         private SharedRef<LibHac.FsSrv.Sf.IFileSystemProxy> _baseFileSystemProxy;
         private ulong _pid;
 
@@ -169,7 +214,11 @@ namespace Ryujinx.HLE.HOS.Services.Fs
         // FormatSdCardFileSystem() -> ()
         public ResultCode FormatSdCardFileSystem(ServiceCtx context)
         {
-            return (ResultCode)_baseFileSystemProxy.Get.FormatSdCardFileSystem().Value;
+            // [Nextendo, HOME Menu work] The "microSD card" is a folder of the computer: "Format
+            // microSD Card" of the HOME Menu settings erases nothing.
+            Ryujinx.Common.Logging.Logger.Warning?.Print(Ryujinx.Common.Logging.LogClass.ServiceFs, "[home] microSD card format asked: nothing erased (the card is a folder of the computer)");
+
+            return ResultCode.Success;
         }
 
         [CommandCmif(21)]
@@ -347,8 +396,14 @@ namespace Ryujinx.HLE.HOS.Services.Fs
         // CreateSaveDataFileSystemWithCreationInfo2(buffer<nn::fs::SaveDataCreationInfo2, 25> creationInfo) -> ()
         public ResultCode CreateSaveDataFileSystemWithCreationInfo2(ServiceCtx context)
         {
-            byte[] creationInfoBuffer = new byte[context.Request.SendBuff[0].Size];
-            context.Memory.Read(context.Request.SendBuff[0].Position, creationInfoBuffer);
+            // The structure comes as a fixed-size pointer buffer (type 0x19); older callers
+            // sent it as a mapped one.
+            bool pointer = context.Request.SendBuff.Count == 0;
+            ulong infoPosition = pointer ? context.Request.PtrBuff[0].Position : context.Request.SendBuff[0].Position;
+            ulong infoSize = pointer ? context.Request.PtrBuff[0].Size : context.Request.SendBuff[0].Size;
+
+            byte[] creationInfoBuffer = new byte[System.Math.Max(infoSize, (ulong)System.Runtime.CompilerServices.Unsafe.SizeOf<SaveDataCreationInfo2>())];
+            context.Memory.Read(infoPosition, creationInfoBuffer.AsSpan(0, (int)infoSize));
             ref readonly SaveDataCreationInfo2 creationInfo = ref SpanHelpers.AsReadOnlyStruct<SaveDataCreationInfo2>(creationInfoBuffer);
 
             return (ResultCode)_baseFileSystemProxy.Get.CreateSaveDataFileSystemWithCreationInfo2(in creationInfo).Value;
@@ -798,6 +853,8 @@ namespace Ryujinx.HLE.HOS.Services.Fs
 #pragma warning restore IDE0059
             ulong titleId = context.RequestData.ReadUInt64();
 
+            Logger.Info?.Print(LogClass.ServiceFs, $"[fs] data storage {titleId:X16} asked by process {context.Process.Pid}");
+
             // We do a mitm here to find if the request is for an AOC.
             // This is because AOC can be distributed over multiple containers in the emulator.
             if (context.Device.System.ContentManager.GetAocDataStorage(titleId, out LibHac.Fs.IStorage aocStorage, context.Device.Configuration.FsIntegrityCheckLevel))
@@ -840,6 +897,13 @@ namespace Ryujinx.HLE.HOS.Services.Fs
                             LibHac.Fs.IStorage ncaStorage = new LocalStorage(ncaPath, FileAccess.Read, FileMode.Open);
                             Nca nca = new(context.Device.System.KeySet, ncaStorage);
                             LibHac.Fs.IStorage romfsStorage = nca.OpenStorage(NcaSectionType.Data, context.Device.System.FsIntegrityCheckLevel);
+
+                            // [Nextendo] The controller pictures follow the controller of player 1.
+                            if (titleId == 0x010000000000081E)
+                            {
+                                romfsStorage = NextendoBranding.ControllerIcons(romfsStorage);
+                            }
+
                             using SharedRef<LibHac.Fs.IStorage> sharedStorage = new(romfsStorage);
                             using SharedRef<IStorage> sfStorage = new(new StorageInterfaceAdapter(ref sharedStorage.Ref));
 

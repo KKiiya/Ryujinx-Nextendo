@@ -82,6 +82,9 @@ namespace Ryujinx.Ava.Common
             try
             {
                 List<object> items = [];
+                // the HOME Menu and the applets of the system are no games played
+                local = local.FindAll(h => !Ryujinx.Common.Configuration.NextendoGames.IsSystemProgram(h.TitleId));
+
                 foreach (HistoryItem h in local)
                 {
                     items.Add(new
@@ -119,6 +122,44 @@ namespace Ryujinx.Ava.Common
             }
 
             return result;
+        }
+
+        /// <summary>Reads a friend's play history, which the server exposes only to accepted friends.</summary>
+        public static async Task<List<HistoryItem>> GetFriendHistoryAsync(ulong pid)
+        {
+            List<HistoryItem> history = [];
+            try
+            {
+                using HttpClient http = Client();
+                using HttpResponseMessage response = await http.GetAsync($"{BaseUrl()}/api/friends/history?pid={pid}");
+                HealIfRejected(response);
+                if (!response.IsSuccessStatusCode)
+                {
+                    return history;
+                }
+
+                using JsonDocument document = JsonDocument.Parse(await response.Content.ReadAsStringAsync());
+                if (document.RootElement.TryGetProperty("history", out JsonElement entries) && entries.ValueKind == JsonValueKind.Array)
+                {
+                    foreach (JsonElement entry in entries.EnumerateArray())
+                    {
+                        history.Add(new HistoryItem
+                        {
+                            TitleId = entry.TryGetProperty("title_id", out JsonElement titleId) ? titleId.GetString() ?? "" : "",
+                            Name = entry.TryGetProperty("name", out JsonElement name) ? name.GetString() ?? "" : "",
+                            IconBase64 = entry.TryGetProperty("icon", out JsonElement icon) ? icon.GetString() ?? "" : "",
+                            Seconds = entry.TryGetProperty("seconds", out JsonElement seconds) && seconds.TryGetInt64(out long duration) ? duration : 0,
+                            LastPlayed = entry.TryGetProperty("last_played", out JsonElement lastPlayed) ? lastPlayed.GetString() ?? "" : "",
+                        });
+                    }
+                }
+            }
+            catch (Exception ex)
+            {
+                Logger.Warning?.Print(LogClass.Application, $"[Nextendo] friend history failed: {ex.Message}");
+            }
+
+            return history;
         }
 
         public static string BaseUrl()
@@ -162,9 +203,9 @@ namespace Ryujinx.Ava.Common
             // [Nextendo] Preuve d'application (client_id enregistré), distincte du jeton joueur
             // ci-dessus : voir NextendoAppSecrets pour pourquoi les deux ne peuvent pas partager
             // un en-tête. Nom d'en-tête à garder synchronisé avec apiGuard côté serveur.
-            if (!string.IsNullOrEmpty(NextendoAppSecrets.AppToken))
+            if (!string.IsNullOrEmpty(NextendoAppIdentity.Id))
             {
-                http.DefaultRequestHeaders.Add("X-Nextendo-Client-Id", NextendoAppSecrets.AppToken);
+                http.DefaultRequestHeaders.Add("X-Nextendo-Client-Id", NextendoAppIdentity.Id);
             }
 
             return http;
@@ -178,9 +219,9 @@ namespace Ryujinx.Ava.Common
         /// </summary>
         public static void AddAppHeader(HttpClient http)
         {
-            if (!string.IsNullOrEmpty(NextendoAppSecrets.AppToken))
+            if (!string.IsNullOrEmpty(NextendoAppIdentity.Id))
             {
-                http.DefaultRequestHeaders.Add("X-Nextendo-Client-Id", NextendoAppSecrets.AppToken);
+                http.DefaultRequestHeaders.Add("X-Nextendo-Client-Id", NextendoAppIdentity.Id);
             }
         }
 
@@ -425,6 +466,26 @@ namespace Ryujinx.Ava.Common
             }
         }
 
+        // Le pseudo du compte tel que le serveur l'affiche partout (displayName de
+        // nextendo-account) : profile.name s'il est rempli, sinon l'identifiant (username).
+        // On recopiait l'identifiant seul : un joueur dont le pseudo differe de son identifiant
+        // (pseudo venu de la Switch, ou refuse comme identifiant) gardait l'identifiant sur le
+        // profil local, donc dans Mario Kart 8 Deluxe, qui lit nn::account::GetNickname.
+        internal static string PseudoDuCompte(JsonElement root)
+        {
+            if (root.TryGetProperty("profile", out JsonElement prof) && prof.ValueKind == JsonValueKind.Object
+                && prof.TryGetProperty("name", out JsonElement n) && n.ValueKind == JsonValueKind.String)
+            {
+                string pseudo = n.GetString()?.Trim();
+                if (!string.IsNullOrEmpty(pseudo))
+                {
+                    return pseudo;
+                }
+            }
+
+            return root.TryGetProperty("username", out JsonElement u) && u.ValueKind == JsonValueKind.String ? u.GetString() : null;
+        }
+
         public static async Task<(string name, byte[] image)> GetProfileSyncAsync()
         {
             try
@@ -439,7 +500,7 @@ namespace Ryujinx.Ava.Common
 
                 using JsonDocument doc = JsonDocument.Parse(await resp.Content.ReadAsStringAsync());
                 JsonElement root = doc.RootElement;
-                string name = root.TryGetProperty("username", out JsonElement u) ? u.GetString() : null;
+                string name = PseudoDuCompte(root);
 
                 byte[] image = null;
                 if (root.TryGetProperty("profile", out JsonElement prof) && prof.ValueKind == JsonValueKind.Object
@@ -452,11 +513,55 @@ namespace Ryujinx.Ava.Common
                     }
                 }
 
+                MirrorLocalProfile(name, image);
+
                 return (name, image);
             }
             catch
             {
                 return (null, null);
+            }
+        }
+
+        // The account is the source of truth: what it says is copied onto the local profile bound
+        // to it (the one the HOME Menu and its user page show). Only done before on login and in
+        // the Nextendo settings: a picture changed on the website or the app stayed old in the
+        // HOME Menu while the emulator's own windows showed the new one.
+        private static void MirrorLocalProfile(string name, byte[] image)
+        {
+            try
+            {
+                var am = RyujinxApp.MainWindow?.AccountManager;
+                string bound = NextendoAccount.ProfileUserId;
+
+                if (am == null || string.IsNullOrEmpty(bound))
+                {
+                    return;
+                }
+
+                foreach (var profile in am.GetAllUsers())
+                {
+                    if (profile.UserId.ToString() != bound)
+                    {
+                        continue;
+                    }
+
+                    if (image is { Length: > 0 } && (profile.Image == null || !profile.Image.AsSpan().SequenceEqual(image)))
+                    {
+                        am.SetUserImage(profile.UserId, image);
+                    }
+
+                    if (!string.IsNullOrEmpty(name) && profile.Name != name)
+                    {
+                        am.SetUserName(profile.UserId, name);
+                    }
+
+                    break;
+                }
+            }
+            catch
+            {
+                // best effort: the windows show the account's picture anyway
             }
         }
 
@@ -587,15 +692,28 @@ namespace Ryujinx.Ava.Common
         }
 
         // Returns the account's accepted friends AND incoming friend requests.
+        /// <summary>[Nextendo] Whether the last friends list came from the server (it was reachable).</summary>
+        public static bool LastSocialReachable { get; private set; } = true;
+
         public static async Task<(List<Friend> friends, List<Friend> requests)> GetSocialAsync()
         {
             List<Friend> friends = [];
             List<Friend> requests = [];
+
+            // No account signed in: nothing to ask (the watchers call this every few seconds,
+            // and the server refused each of these requests).
+            if (string.IsNullOrEmpty(NextendoAccount.NexToken))
+            {
+                return (friends, requests);
+            }
+
             try
             {
                 using HttpClient http = Client();
                 HttpResponseMessage resp = await http.GetAsync($"{BaseUrl()}/api/friends");
                 HealIfRejected(resp); // 401 → jeton révoqué/expiré, purge la session locale (anti-usurpation)
+                // An answer, even a refusal, is a server that is reachable.
+                LastSocialReachable = true;
                 using JsonDocument doc = JsonDocument.Parse(await resp.Content.ReadAsStringAsync());
                 if (doc.RootElement.TryGetProperty("friends", out JsonElement fa) && fa.ValueKind == JsonValueKind.Array)
                 {
@@ -614,6 +732,11 @@ namespace Ryujinx.Ava.Common
             }
             catch (Exception ex)
             {
+                if (ex is HttpRequestException or TaskCanceledException)
+                {
+                    LastSocialReachable = false;
+                }
+
                 Logger.Warning?.Print(LogClass.Application, $"[Nextendo] GetSocial failed: {ex.Message}");
             }
 
@@ -1020,9 +1143,9 @@ namespace Ryujinx.Ava.Common
         private static HttpClient CreateAvatarHttp()
         {
             HttpClient c = new() { Timeout = TimeSpan.FromSeconds(10) };
-            if (!string.IsNullOrEmpty(NextendoAppSecrets.AppToken))
+            if (!string.IsNullOrEmpty(NextendoAppIdentity.Id))
             {
-                c.DefaultRequestHeaders.Add("X-Nextendo-Client-Id", NextendoAppSecrets.AppToken);
+                c.DefaultRequestHeaders.Add("X-Nextendo-Client-Id", NextendoAppIdentity.Id);
             }
             return c;
         }
@@ -1134,7 +1257,7 @@ namespace Ryujinx.Ava.Common
             }
 
             string redirectUri = $"http://127.0.0.1:{port}/callback";
-            string clientId = string.IsNullOrEmpty(NextendoAppSecrets.AppToken) ? "unregistered" : NextendoAppSecrets.AppToken;
+            string clientId = string.IsNullOrEmpty(NextendoAppIdentity.Id) ? "unregistered" : NextendoAppIdentity.Id;
             string authorizeUrl =
                 $"{BaseUrl()}/api/oauth/authorize?response_type=code&client_id={Uri.EscapeDataString(clientId)}" +
                 $"&redirect_uri={Uri.EscapeDataString(redirectUri)}&scope=identity+friends+sauvegardes+history+presence&app=ryujinx" +

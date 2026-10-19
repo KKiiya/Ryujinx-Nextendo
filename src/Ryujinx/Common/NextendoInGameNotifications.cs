@@ -32,12 +32,20 @@ namespace Ryujinx.Ava.Common
         public static readonly ObservableCollection<NextendoToastModel> Toasts = [];
 
         private static readonly object _lock = new();
+        private static int _failedPolls;
+        private static bool _serverLost;
         private static Timer _timer;
         private static bool _active;
         private static long _nextId;
 
         // Baseline captured at game launch, rolled forward each poll.
         private static HashSet<ulong> _knownRequests = [];
+        // Friends online at the last poll (the HOME Menu says so when one comes online).
+        private static HashSet<ulong> _knownOnline = [];
+        // When each friend was last seen online (the console tells a friend coming back after
+        // more than 30 minutes away, not one that flickers).
+        private static Dictionary<ulong, DateTime> _lastSeenOnline = [];
+        private static bool _summaryShown;
         // pid -> the game we last ANNOUNCED for that friend. Only a change to a different game (or a
         // first game after coming online) fires; a presence flicker to "online, no game" does NOT
         // reset it, so a friend staying in one game is announced exactly once.
@@ -111,6 +119,12 @@ namespace Ryujinx.Ava.Common
                 lock (_lock)
                 {
                     _knownRequests = requests.Select(r => r.Pid).ToHashSet();
+                    _knownOnline = friends.Where(f => f.OnlineStatus != 0).Select(f => f.Pid).ToHashSet();
+
+                    foreach (ulong pid in _knownOnline)
+                    {
+                        _lastSeenOnline[pid] = DateTime.UtcNow;
+                    }
                     _announcedGame = friends
                         .Where(f => f.OnlineStatus != 0 && !string.IsNullOrEmpty(f.AppId))
                         .GroupBy(f => f.Pid)
@@ -137,7 +151,34 @@ namespace Ryujinx.Ava.Common
             {
                 (List<NextendoApi.Friend> friends, List<NextendoApi.Friend> requests) = await NextendoApi.GetSocialAsync();
 
+                // [Nextendo] The server unreachable for 45 seconds, then back: said once each.
+                if (!NextendoApi.LastSocialReachable)
+                {
+                    if (++_failedPolls == 3)
+                    {
+                        _serverLost = true;
+                        NextendoEventNotifications.ServerConnection(false);
+                    }
+
+                    return;
+                }
+
+                _failedPolls = 0;
+
+                if (_serverLost)
+                {
+                    _serverLost = false;
+                    NextendoEventNotifications.ServerConnection(true);
+                }
+
                 List<NextendoToastModel> fresh = new();
+
+                // [Nextendo, HOME Menu work] On the HOME Menu, the console's own notifications
+                // (drawn by its overlay applet) say it: a friend request, friends coming online.
+                bool console = Ryujinx.HLE.HOS.HomeMenuStatus.Running;
+                bool newRequest = false;
+                int online = 0;
+                List<ulong> toAnnounce = new();
 
                 lock (_lock)
                 {
@@ -146,10 +187,28 @@ namespace Ryujinx.Ava.Common
                         return;
                     }
 
+                    HashSet<ulong> nowOnline = friends.Where(f => f.OnlineStatus != 0).Select(f => f.Pid).ToHashSet();
+                    DateTime seenAt = DateTime.UtcNow;
+
+                    foreach (ulong pid in nowOnline)
+                    {
+                        if (!_knownOnline.Contains(pid) &&
+                            (!_lastSeenOnline.TryGetValue(pid, out DateTime seen) || seenAt - seen > TimeSpan.FromMinutes(30)))
+                        {
+                            toAnnounce.Add(pid);
+                        }
+
+                        _lastSeenOnline[pid] = seenAt;
+                    }
+
+                    online = nowOnline.Count;
+                    _knownOnline = nowOnline;
+                    newRequest = requests.Any(r => !_knownRequests.Contains(r.Pid));
+
                     // New friend requests since the baseline.
                     foreach (NextendoApi.Friend r in requests)
                     {
-                        if (!_knownRequests.Contains(r.Pid))
+                        if (!_knownRequests.Contains(r.Pid) && !console)
                         {
                             fresh.Add(Build(r,
                                 LocaleManager.Instance[LocaleKeys.Dialog_Nextendo_NotifFriendRequestTitle],
@@ -179,7 +238,17 @@ namespace Ryujinx.Ava.Common
                         }
 
                         _announcedGame.TryGetValue(f.Pid, out string announced);
-                        if (now != announced)
+                        if (now != announced && console)
+                        {
+                            // On the HOME Menu the console says it (friend online, with the game).
+                            if (!toAnnounce.Contains(f.Pid))
+                            {
+                                toAnnounce.Add(f.Pid);
+                            }
+
+                            _announcedGame[f.Pid] = now;
+                        }
+                        else if (now != announced)
                         {
                             fresh.Add(Build(f,
                                 LocaleManager.Instance[LocaleKeys.Dialog_Nextendo_NotifPlayingTitle],
@@ -187,6 +256,33 @@ namespace Ryujinx.Ava.Common
                                     LocaleKeys.Dialog_Nextendo_NotifPlayingFormat, NameOf(f), GameNameOf(f))));
                             _announcedGame[f.Pid] = now;
                         }
+                    }
+                }
+
+                if (console)
+                {
+                    if (newRequest)
+                    {
+                        NextendoSystemNotifications.FriendRequestReceived();
+                    }
+
+                    // How many are online, once (as the console says it when it starts).
+                    if (!_summaryShown && online > 0)
+                    {
+                        _summaryShown = true;
+                        NextendoSystemNotifications.FriendsOnline(online);
+                    }
+
+                    // the HOME Menu reads these friends from the emulator's list right after the
+                    // notification: fresh first, or it sees them offline and says "Online"
+                    if (toAnnounce.Count > 0)
+                    {
+                        Ryujinx.Common.Configuration.NextendoFriends.RefreshNow();
+                    }
+
+                    foreach (ulong pid in toAnnounce)
+                    {
+                        NextendoSystemNotifications.FriendOnline(pid);
                     }
                 }
 
@@ -307,6 +403,12 @@ namespace Ryujinx.Ava.Common
 
         private static void Push(NextendoToastModel toast, TimeSpan duration)
         {
+            // [Nextendo, HOME Menu work] In the HOME Menu, the notifications are the system's own.
+            if (Ryujinx.HLE.HOS.HomeMenuStatus.Running)
+            {
+                return;
+            }
+
             Toasts.Insert(0, toast);
 
             while (Toasts.Count > MaxToasts)

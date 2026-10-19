@@ -28,9 +28,15 @@ namespace Ryujinx.HLE.HOS.Services.Am.AppletAE.AllSystemAppletProxiesService.Sys
         private readonly KEvent _acquiredSleepLockEvent;
         private int _acquiredSleepLockEventHandle;
 
-        public ICommonStateGetter(ServiceCtx context)
+        private readonly ulong _pid;
+
+        // A real library applet has its own message queue and focus state.
+        private AppletStateMgr State(ServiceCtx context) => RealAppletManager.StateFor(context.Device.System, _pid);
+
+        public ICommonStateGetter(ServiceCtx context, ulong pid = 0)
         {
             _context = context;
+            _pid = pid;
 
             _apmManagerServer = new Apm.ManagerServer(context);
             _apmSystemManagerServer = new Apm.SystemManagerServer(context);
@@ -42,7 +48,7 @@ namespace Ryujinx.HLE.HOS.Services.Am.AppletAE.AllSystemAppletProxiesService.Sys
         // GetEventHandle() -> handle<copy>
         public ResultCode GetEventHandle(ServiceCtx context)
         {
-            KEvent messageEvent = context.Device.System.AppletState.MessageEvent;
+            KEvent messageEvent = State(context).MessageEvent;
 
             if (_messageEventHandle == 0)
             {
@@ -57,21 +63,32 @@ namespace Ryujinx.HLE.HOS.Services.Am.AppletAE.AllSystemAppletProxiesService.Sys
             return ResultCode.Success;
         }
 
+        [CommandCmif(20)]
+        // PushToGeneralChannel(object<nn::am::service::IStorage>)
+        public ResultCode PushToGeneralChannel(ServiceCtx context)
+        {
+            // [Nextendo, HOME Menu work] A message for the HOME Menu (the initial setup asks it to
+            // open the parental controls, for instance): kept until the HOME Menu takes it.
+            RealAppletManager.PushToGeneralChannel(GetObject<IStorage>(context, 0).Data);
+
+            return ResultCode.Success;
+        }
+
         [CommandCmif(1)]
         // ReceiveMessage() -> nn::am::AppletMessage
         public ResultCode ReceiveMessage(ServiceCtx context)
         {
-            if (!context.Device.System.AppletState.Messages.TryDequeue(out AppletMessage message))
+            if (!State(context).Messages.TryDequeue(out AppletMessage message))
             {
                 return ResultCode.NoMessages;
             }
 
-            KEvent messageEvent = context.Device.System.AppletState.MessageEvent;
+            KEvent messageEvent = State(context).MessageEvent;
 
             // NOTE: Service checks if current states are different than the stored ones.
             //       Since we don't support any states for now, it's fine to check if there is still messages available.
 
-            if (context.Device.System.AppletState.Messages.IsEmpty)
+            if (State(context).Messages.IsEmpty)
             {
                 messageEvent.ReadableEvent.Clear();
             }
@@ -120,7 +137,7 @@ namespace Ryujinx.HLE.HOS.Services.Am.AppletAE.AllSystemAppletProxiesService.Sys
         // GetCurrentFocusState() -> u8
         public ResultCode GetCurrentFocusState(ServiceCtx context)
         {
-            context.ResponseData.Write((byte)context.Device.System.AppletState.FocusState);
+            context.ResponseData.Write((byte)State(context).FocusState);
 
             return ResultCode.Success;
         }
@@ -129,6 +146,10 @@ namespace Ryujinx.HLE.HOS.Services.Am.AppletAE.AllSystemAppletProxiesService.Sys
         // RequestToAcquireSleepLock()
         public ResultCode RequestToAcquireSleepLock(ServiceCtx context)
         {
+            // The emulator never sleeps, so the lock is granted at once: the caller (qlaunch)
+            // waits on this event before going any further.
+            _acquiredSleepLockEvent.ReadableEvent.Signal();
+
             Logger.Stub?.PrintStub(LogClass.ServiceAm);
 
             return ResultCode.Success;
@@ -330,6 +351,32 @@ namespace Ryujinx.HLE.HOS.Services.Am.AppletAE.AllSystemAppletProxiesService.Sys
                     _acquiredSleepLockEventHandle = 0;
                 }
             }
+        }
+        [CommandCmif(30)]
+        // GetHomeButtonReaderLockAccessor() -> object<nn::am::service::ILockAccessor>
+        public ResultCode GetHomeButtonReaderLockAccessor(ServiceCtx context)
+        {
+            MakeObject(context, new ILockAccessor(context));
+
+            return ResultCode.Success;
+        }
+
+        [CommandCmif(31)] // 2.0.0+
+        // GetReaderLockAccessorEx(u32) -> object<nn::am::service::ILockAccessor>
+        public ResultCode GetReaderLockAccessorEx(ServiceCtx context)
+        {
+            MakeObject(context, new ILockAccessor(context));
+
+            return ResultCode.Success;
+        }
+
+        [CommandCmif(32)] // 7.0.0+
+        // GetWriterLockAccessorEx(u32) -> object<nn::am::service::ILockAccessor>
+        public ResultCode GetWriterLockAccessorEx(ServiceCtx context)
+        {
+            MakeObject(context, new ILockAccessor(context));
+
+            return ResultCode.Success;
         }
     }
 }

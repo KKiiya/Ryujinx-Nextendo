@@ -90,7 +90,47 @@ namespace Ryujinx.Ava.Systems
             // Même chose pour le circuit, repéré au chargement de ses fichiers : aucun rapport
             // de jeu ne l'annonce à ce moment-là.
             NextendoCourseWatcher.Change += SurChangementDeSalon;
+            Ryujinx.HLE.HOS.HomeMenuStatus.Changed += SurChangementDeSalon;
+            NextendoActivity.Changed += SurChangementDeSalon;
         }
+
+        /// <summary>[Nextendo] The HOME Menu is not a game: it gets its own wording.</summary>
+        private static bool EstMenuHome(string titleId) =>
+            string.Equals(titleId, Ryujinx.HLE.HOS.HomeMenuStatus.ProgramIdText, StringComparison.OrdinalIgnoreCase) ||
+            string.Equals(titleId, StarterIdText, StringComparison.OrdinalIgnoreCase);
+
+        /// <summary>The initial setup of the console, started by the HOME Menu on the first launch.</summary>
+        private const string StarterIdText = "0100000000001012";
+
+        /// <summary>Second line while on the HOME Menu: the screen the player is on.</summary>
+        private static string EcranMenuHome() => Ryujinx.HLE.HOS.HomeMenuStatus.Applet switch
+        {
+            string game when game.StartsWith("Application:", StringComparison.Ordinal) => "Playing " + game["Application:".Length..],
+            "Homebrew:hbmenu" => "Browsing the homebrew menu",
+            string homebrew when homebrew.StartsWith("Homebrew:", StringComparison.Ordinal) => "Running " + homebrew["Homebrew:".Length..] + " (homebrew)",
+            "MyPage" => NextendoActivity.Detail switch
+            {
+                string friend when friend.StartsWith("Friend:", StringComparison.Ordinal) => "Looking at " + friend["Friend:".Length..] + "'s page",
+                "FriendList" => "Browsing the friend list",
+                "AddFriend" => "Adding a friend",
+                _ => "On their user page",
+            },
+            "Settings" => "In System Settings",
+            "Starter" => "Setting up the console",
+            "Error" => "Reading an error message",
+            "" when NextendoActivity.Detail == "NewsArticle" => "Reading Nextendo News",
+            "" when NextendoActivity.Detail == "News" => "Browsing Nextendo News",
+            "PhotoViewer" => "Browsing the album",
+            "Controller" => "Setting up controllers",
+            "SoftwareKeyboard" => "Typing",
+            "PlayerSelect" => "Choosing a user",
+            "MiiEdit" => "Editing a Mii",
+            "LibAppletShop" => "On the eShop",
+            "LibAppletWeb" or "LibAppletOff" or "LibAppletWhitelisted" => "Reading a page",
+            "NetConnect" => "Connecting to the internet",
+            "Cabinet" => "Managing amiibo",
+            _ => "Browsing the menu",
+        };
 
         private static void SurChangementDeSalon()
         {
@@ -191,6 +231,13 @@ namespace Ryujinx.Ava.Systems
         {
             if (titleId.TryGet(out string tid) && Switch.Shared.Processes.ActiveApplication is not null)
             {
+                // Another program in front (a game started from the HOME Menu, or the menu again
+                // after it): the presence is made anew, not the previous one kept.
+                if (!string.Equals(_currentTitleId, tid ?? "", StringComparison.OrdinalIgnoreCase))
+                {
+                    _discordPresencePlaying = null;
+                }
+
                 _currentTitleId = tid ?? "";
 
                 // La bascule d'application doit précéder la publication : sinon le premier message
@@ -275,6 +322,22 @@ namespace Ryujinx.Ava.Systems
                 Timestamps = GuestAppStartedAt ??= Timestamps.Now
             };
 
+            if (EstMenuHome(tid))
+            {
+                presence.Details = "On the HOME Menu";
+                presence.Assets.LargeImageText = "Nintendo Switch HOME Menu";
+
+                // On the menu, the big picture is the player's own (their Nextendo profile picture).
+                if (surNous && NextendoAccount.Pid != 0)
+                {
+                    presence.Assets.LargeImageKey = $"{NextendoEndpoint.Canonical}/api/avatar?pid={NextendoAccount.Pid}";
+                    presence.Assets.LargeImageText = TruncateToByteLength(
+                        string.IsNullOrEmpty(NextendoAccount.Username) ? "Nintendo Switch HOME Menu" : NextendoAccount.Username);
+                    presence.Assets.SmallImageKey = NextendoIcones.UrlJeu(tid) is { Length: > 0 } menu ? menu : NextendoIcones.UrlReseau();
+                    presence.Assets.SmallImageText = "HOME Menu";
+                }
+            }
+
             _etatJeu = "";
             _etatParDefaut = appMeta.LastPlayed.HasValue && appMeta.TimePlayed.TotalSeconds > 5
                 ? $"Total play time: {ValueFormatUtils.FormatTimeSpan(appMeta.TimePlayed)}"
@@ -341,6 +404,11 @@ namespace Ryujinx.Ava.Systems
             // a dit de lui-même. Tout est facultatif ; s'il ne reste rien, le temps de jeu.
             string compose = string.Join(" · ",
                 new[] { etatSalon, circuit, _etatJeu }.Where(m => !string.IsNullOrEmpty(m)));
+
+            if (EstMenuHome(_currentTitleId))
+            {
+                compose = EcranMenuHome();
+            }
 
             presence.State = TruncateToByteLength(compose.Length > 0 ? compose : _etatParDefaut);
         }

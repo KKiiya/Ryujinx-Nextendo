@@ -28,24 +28,126 @@ namespace Ryujinx.HLE.HOS.Services.Am.AppletAE.AllSystemAppletProxiesService.Lib
 
         private int _indirectLayerHandle;
 
-        public ILibraryAppletAccessor(AppletId appletId, Horizon system)
+        // Set when the applet runs from its real system title (see RealApplet).
+        private readonly RealApplet _real;
+        private readonly string _realPath;
+        private readonly AppletId _appletId;
+        private readonly LibraryAppletMode _mode;
+        private KEvent _unknown170Event;
+        private int _unknown170EventHandle;
+
+        public ILibraryAppletAccessor(AppletId appletId, Horizon system, ulong callerPid = 0, LibraryAppletMode mode = LibraryAppletMode.AllForeground)
         {
             _kernelContext = system.KernelContext;
+            _appletId = appletId;
+            _mode = mode;
 
             _stateChangedEvent = new KEvent(system.KernelContext);
             _normalOutDataEvent = new KEvent(system.KernelContext);
             _interactiveOutDataEvent = new KEvent(system.KernelContext);
 
-            _applet = AppletManager.Create(appletId, system);
-
             _normalSession = new AppletSession();
             _interactiveSession = new AppletSession();
 
-            _applet.AppletStateChanged += OnAppletStateChanged;
+            Switch device = system.KernelContext.Device;
+
+            if (RealAppletManager.CallerIsSystemApplet(device, callerPid))
+            {
+                _realPath = RealAppletManager.PathOf(device, appletId);
+            }
+
+            if (_realPath != null)
+            {
+                _real = new RealApplet
+                {
+                    AppletId = appletId,
+                    Mode = mode,
+                    CallerPid = callerPid,
+                    Normal = _normalSession.GetConsumer(),
+                    Interactive = _interactiveSession.GetConsumer(),
+                    OnExited = () => _stateChangedEvent.ReadableEvent.Signal(),
+                };
+            }
+            else
+            {
+                _applet = AppletManager.Create(appletId, system);
+                _applet.AppletStateChanged += OnAppletStateChanged;
+            }
             _normalSession.DataAvailable += OnNormalOutData;
             _interactiveSession.DataAvailable += OnInteractiveOutData;
 
             Logger.Info?.Print(LogClass.ServiceAm, $"Applet '{appletId}' created.");
+        }
+
+        // [Nextendo, HOME Menu work] Winding: the applet this accessor was made for is started
+        // by the system, in the place of the one that asked for it (which ended meanwhile).
+        // Returns what tells when that applet is over.
+        public Func<bool> StartInPlaceOf(Switch device, ulong callerPid)
+        {
+            if (_eshop)
+            {
+                AnswerEshop(device.System);
+
+                return () => true;
+            }
+
+            if (_real == null)
+            {
+                // An applet of the emulator (the Nextendo sign-in page): over when it says so.
+                if (_applet == null)
+                {
+                    return () => true;
+                }
+
+                bool over = false;
+
+                _applet.AppletStateChanged += (_, _) => over = true;
+                _applet.Start(_normalSession.GetConsumer(), _interactiveSession.GetConsumer());
+
+                return () => over;
+            }
+
+            _real.CallerPid = callerPid;
+
+            RealAppletManager.Start(device, _real, _realPath);
+
+            return () => _real.Exited;
+        }
+
+        private bool _eshop;
+
+        // The eShop: the store opened in the browser, the user selection answered as cancelled
+        // (ResultCancelledByUser 0x27C and no user, as the selection answers B): the HOME Menu
+        // stays where it was.
+        private void AnswerEshop(Horizon system)
+        {
+            Applets.Browser.BrowserApplet.OpenNintendoStore(system);
+
+            byte[] answer = new byte[0x18];
+
+            BitConverter.TryWriteBytes(answer.AsSpan(0, 8), 0x27CUL);
+            _normalSession.GetConsumer().Push(answer);
+            _stateChangedEvent.ReadableEvent.Signal();
+        }
+
+        // The accessor handed again to the applet that wound, in its new process: the handles
+        // given to the previous one are not valid there.
+        public void ReuseFor()
+        {
+            _stateChangedEventHandle = 0;
+            _normalOutDataEventHandle = 0;
+            _interactiveOutDataEventHandle = 0;
+            _unknown170EventHandle = 0;
+
+            if (_real != null && _real.Exited)
+            {
+                _stateChangedEvent.ReadableEvent.Signal();
+            }
+
+            if (_normalSession.Length > 0)
+            {
+                _normalOutDataEvent.WritableEvent.Signal();
+            }
         }
 
         private void OnAppletStateChanged(object sender, EventArgs e)
@@ -84,6 +186,20 @@ namespace Ryujinx.HLE.HOS.Services.Am.AppletAE.AllSystemAppletProxiesService.Lib
         // Start()
         public ResultCode Start(ServiceCtx context)
         {
+            if (_eshop)
+            {
+                AnswerEshop(context.Device.System);
+
+                return ResultCode.Success;
+            }
+
+            if (_real != null)
+            {
+                RealAppletManager.Start(context.Device, _real, _realPath);
+
+                return ResultCode.Success;
+            }
+
             return (ResultCode)_applet.Start(_normalSession.GetConsumer(), _interactiveSession.GetConsumer());
         }
 
@@ -91,6 +207,17 @@ namespace Ryujinx.HLE.HOS.Services.Am.AppletAE.AllSystemAppletProxiesService.Lib
         // RequestExit()
         public ResultCode RequestExit(ServiceCtx context)
         {
+            if (_real != null)
+            {
+                if (_real.State != null && !_real.Exited)
+                {
+                    _real.State.Messages.Enqueue(SystemAppletProxy.AppletMessage.Exit);
+                    _real.State.MessageEvent.ReadableEvent.Signal();
+                }
+
+                return ResultCode.Success;
+            }
+
             // TODO: Since we don't support software Applet for now, we can just signals the changed state of the applet.
             _stateChangedEvent.ReadableEvent.Signal();
 
@@ -103,6 +230,11 @@ namespace Ryujinx.HLE.HOS.Services.Am.AppletAE.AllSystemAppletProxiesService.Lib
         // GetResult()
         public ResultCode GetResult(ServiceCtx context)
         {
+            if (_real != null)
+            {
+                return ResultCode.Success;
+            }
+
             return (ResultCode)_applet.GetResult();
         }
 
@@ -142,6 +274,15 @@ namespace Ryujinx.HLE.HOS.Services.Am.AppletAE.AllSystemAppletProxiesService.Lib
         public ResultCode PushInData(ServiceCtx context)
         {
             IStorage data = GetObject<IStorage>(context, 0);
+
+            // [Nextendo] The HOME Menu asks who visits the eShop: the user selection's settings
+            // (0xA0 bytes) with no application (+0x88) and the purpose 2 (+0x98; 0x10 when a
+            // game is started). The Nintendo website's store is opened instead (no account needed).
+            if (_appletId == AppletId.PlayerSelect && _real != null && data.Data.Length == 0xA0 &&
+                BitConverter.ToUInt64(data.Data, 0x88) == 0 && BitConverter.ToUInt32(data.Data, 0x98) == 2)
+            {
+                _eshop = true;
+            }
 
             _normalSession.Push(data.Data);
 
@@ -275,6 +416,57 @@ namespace Ryujinx.HLE.HOS.Services.Am.AppletAE.AllSystemAppletProxiesService.Lib
             Horizon horizon = _kernelContext.Device.System;
 
             horizon.AppletState.IndirectLayerHandles.Delete(_indirectLayerHandle);
+        }
+        [CommandCmif(1)]
+        // IsCompleted() -> bool
+        public ResultCode IsCompleted(ServiceCtx context)
+        {
+            context.ResponseData.Write(_real == null || _real.Exited);
+
+            return ResultCode.Success;
+        }
+
+        [CommandCmif(25)]
+        // Terminate()
+        public ResultCode Terminate(ServiceCtx context)
+        {
+            if (_real != null)
+            {
+                RealAppletManager.RequestFinish(_real);
+            }
+
+            return ResultCode.Success;
+        }
+
+        [CommandCmif(120)]
+        // GetLibraryAppletInfo() -> nn::am::service::LibraryAppletInfo
+        public ResultCode GetLibraryAppletInfo(ServiceCtx context)
+        {
+            context.ResponseData.Write((uint)_appletId);
+            context.ResponseData.Write((uint)_mode);
+
+            return ResultCode.Success;
+        }
+
+        [CommandCmif(170)] // 20.0.0+
+        // () -> handle<copy>
+        public ResultCode Unknown170(ServiceCtx context)
+        {
+            // An event the caller waits on together with the "launchable" one before it starts
+            // the applet. Never signalled here: the launch always goes through.
+            _unknown170Event ??= new KEvent(_kernelContext);
+
+            if (_unknown170EventHandle == 0)
+            {
+                if (context.Process.HandleTable.GenerateHandle(_unknown170Event.ReadableEvent, out _unknown170EventHandle) != Result.Success)
+                {
+                    throw new InvalidOperationException("Out of handles!");
+                }
+            }
+
+            context.Response.HandleDesc = IpcHandleDesc.MakeCopy(_unknown170EventHandle);
+
+            return ResultCode.Success;
         }
     }
 }

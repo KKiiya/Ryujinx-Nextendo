@@ -140,6 +140,8 @@ namespace Ryujinx.Ava.Systems
         public string ApplicationPath { get; private set; }
         public ulong ApplicationId { get; private set; }
         public bool ScreenshotRequested { get; set; }
+        private bool _consoleHomeKeyDown;
+        private bool _consoleCaptureKeyDown;
 
         public AppHost(
             RendererHost renderer,
@@ -442,6 +444,19 @@ namespace Ryujinx.Ava.Systems
                         SaveBitmapAsPng(bitmapToSave, path);
 
                         Logger.Notice.Print(LogClass.Application, $"Screenshot saved to '{path}'.", "Screenshot");
+
+                        // [Nextendo] Told with a small copy of the picture.
+                        try
+                        {
+                            using SKBitmap small = bitmapToSave.Resize(new SKImageInfo(256, 144), SKFilterQuality.Medium);
+                            using SKData png = small.Encode(SKEncodedImageFormat.Png, 90);
+
+                            Ryujinx.Ava.Common.NextendoEventNotifications.ScreenshotSaved(png.ToArray());
+                        }
+                        catch (Exception ex)
+                        {
+                            Logger.Warning?.Print(LogClass.Application, $"[Nextendo] screenshot notification: {ex.Message}");
+                        }
                     }
                 });
             }
@@ -478,6 +493,11 @@ namespace Ryujinx.Ava.Systems
             }
 
             TouchScreenManager.Initialize(Device);
+
+            // [Nextendo, HOME Menu work] A mapping changed in the HOME Menu is the input setting of
+            // the emulator: kept in its configuration file.
+            NpadManager.ButtonConfigChanged -= SaveInputConfiguration;
+            NpadManager.ButtonConfigChanged += SaveInputConfiguration;
 
             Dispatcher.UIThread.InvokeAsync(() =>
             {
@@ -961,6 +981,39 @@ namespace Ryujinx.Ava.Systems
             }
         }
 
+        // [Nextendo, HOME Menu work] Sleep mode: the emulation paused, the screen dark; a button
+        // wakes it.
+        private volatile bool _sleeping;
+        private bool _wakeArmed;
+
+        internal void Sleep()
+        {
+            if (_sleeping || Device == null)
+            {
+                return;
+            }
+
+            Logger.Info?.Print(LogClass.Emulation, "[Nextendo] sleep mode");
+
+            _wakeArmed = false;
+            _sleeping = true;
+
+            Pause();
+
+            Dispatcher.UIThread.Post(() => RendererHost.IsVisible = false);
+        }
+
+        private void Wake()
+        {
+            _sleeping = false;
+
+            Logger.Info?.Print(LogClass.Emulation, "[Nextendo] woken up");
+
+            // The HOME Menu cannot come back from its own sleep without the console's power
+            // services: the emulator starts again, on the lock screen, as a console waking up.
+            Ryujinx.HLE.HOS.HomeMenuStatus.RequestRelaunch();
+        }
+
         internal void Resume()
         {
             Device?.System.TogglePauseEmulation(false);
@@ -1009,6 +1062,13 @@ namespace Ryujinx.Ava.Systems
                     VulkanHelper.GetRequiredInstanceExtensions),
                 _ => new OpenGLRenderer()
             };
+
+            // [Nextendo] The controller of player 1: its symbols in the HOME Menu (PlayStation,
+            // Xbox).
+            Ryujinx.HLE.HOS.Services.Sdb.Pl.ControllerButtonFont.Style =
+                ConfigurationState.Instance.Hid.InputConfig.Value?.Find(c => c?.PlayerIndex == Ryujinx.Common.Configuration.Hid.PlayerIndex.Player1) is { Backend: Ryujinx.Common.Configuration.Hid.InputBackendType.GamepadSDL3 } first
+                        ? Ryujinx.HLE.HOS.Services.Sdb.Pl.ControllerButtonFont.StyleOf(first.Name)
+                        : Ryujinx.HLE.HOS.Services.Sdb.Pl.ControllerStyle.Nintendo;
 
             // Initialize Configuration.
             Device = new Switch(ConfigurationState.Instance.CreateHleConfiguration()
@@ -1177,6 +1237,10 @@ namespace Ryujinx.Ava.Systems
                                 _renderingStarted = true;
                                 _viewModel.SwitchToRenderer(false);
                                 InitStatus();
+
+                                // [Nextendo] The window hidden while the HOME Menu loaded shows
+                                // with the first frame, not with the loading screen.
+                                _viewModel.Window?.RevealAfterBackgroundLoad();
                             }
 
                             Device.PresentFrame(() =>
@@ -1348,6 +1412,20 @@ namespace Ryujinx.Ava.Systems
 
             NpadManager.Update(ConfigurationState.Instance.Graphics.AspectRatio.Value.ToFloat());
 
+            // [Nextendo, HOME Menu work] Asleep: a button pressed (after the one that chose sleep
+            // is let go) wakes the console.
+            if (_sleeping)
+            {
+                if (!NpadManager.AnyButtonPressed)
+                {
+                    _wakeArmed = true;
+                }
+                else if (_wakeArmed)
+                {
+                    Wake();
+                }
+            }
+
             if (_viewModel.IsActive)
             {
                 bool isCursorVisible = true;
@@ -1394,6 +1472,30 @@ namespace Ryujinx.Ava.Systems
                         _keyboardInterface.IsPressed((Key)ConfigurationState.Instance.Hid.Hotkeys.Value.TurboMode) != Device.TurboMode)
                     {
                         Device.ToggleTurbo();
+                    }
+
+                    // [Nextendo, HOME Menu work] The console's HOME and Capture buttons of a keyboard
+                    // configuration (input settings), in a HOME Menu session.
+                    if (Ryujinx.HLE.HOS.HomeMenuStatus.Running &&
+                        NpadManager?.GetPlayerInputConfigByIndex(0) is Ryujinx.Common.Configuration.Hid.Keyboard.StandardKeyboardInputConfig keys)
+                    {
+                        bool homeKey = keys.RightJoycon.ButtonHome != Ryujinx.Common.Configuration.Hid.PhysicalKey.Unbound &&
+                                       _keyboardInterface.IsPressed((Key)(int)keys.RightJoycon.ButtonHome);
+                        bool captureKey = keys.LeftJoycon.ButtonCapture != Ryujinx.Common.Configuration.Hid.PhysicalKey.Unbound &&
+                                          _keyboardInterface.IsPressed((Key)(int)keys.LeftJoycon.ButtonCapture);
+
+                        if (homeKey && !_consoleHomeKeyDown)
+                        {
+                            Device.System.PressHomeButton();
+                        }
+
+                        if (captureKey && !_consoleCaptureKeyDown)
+                        {
+                            ScreenshotRequested = true;
+                        }
+
+                        _consoleHomeKeyDown = homeKey;
+                        _consoleCaptureKeyDown = captureKey;
                     }
 
                     switch (currentHotkeyState)
@@ -1550,6 +1652,23 @@ namespace Ryujinx.Ava.Systems
             }
 
             return state;
+        }
+
+        private static void SaveInputConfiguration()
+        {
+            Dispatcher.UIThread.Post(() =>
+            {
+                if (ConfigurationState.Instance.System.UseInputGlobalConfig.Value && Program.UseExtraConfig)
+                {
+                    ConfigurationState.InstanceExtra.ToFileFormat().SaveConfig(Program.GlobalConfigurationPath);
+                }
+                else
+                {
+                    ConfigurationState.Instance.ToFileFormat().SaveConfig(Program.ConfigurationPath);
+                }
+
+                Logger.Info?.Print(LogClass.Application, "[home] button mapping saved in the input settings");
+            });
         }
     }
 }

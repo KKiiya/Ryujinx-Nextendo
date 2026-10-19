@@ -97,11 +97,29 @@ namespace Ryujinx.HLE.HOS
 
         internal KEvent VsyncEvent { get; private set; }
 
+        // [Nextendo, HOME Menu work] One vertical sync event per display client. Programs wait
+        // on theirs and clear it as they wake: with a single shared event, two programs running
+        // side by side (the HOME Menu and an applet) steal each other's wake-ups, and the one
+        // that keeps losing never runs the thread that waits on it (its input thread).
+        private readonly System.Collections.Concurrent.ConcurrentBag<KEvent> _clientVsyncEvents = [];
+
+        internal KEvent CreateClientVsyncEvent()
+        {
+            KEvent clientEvent = new(KernelContext);
+
+            _clientVsyncEvents.Add(clientEvent);
+
+            return clientEvent;
+        }
+
         internal KEvent DisplayResolutionChangeEvent { get; private set; }
 
         public KeySet KeySet => Device.FileSystem.KeySet;
 
         private bool _isDisposed;
+
+        /// <summary>True from the moment the emulation is being stopped (or restarted).</summary>
+        internal bool Stopping => _isDisposed;
 
         public bool EnablePtc { get; set; }
 
@@ -177,6 +195,7 @@ namespace Ryujinx.HLE.HOS
 
             KSharedMemory timeSharedMemory = new(KernelContext, timeStorage, 0, 0, KMemoryPermission.Read);
 
+            TimeServiceManager.ResetClocks();
             TimeServiceManager.Instance.Initialize(device, this, timeSharedMemory, timeStorage, TimeSize);
 
             AppletCaptureBufferTransfer = new KTransferMemory(KernelContext, appletCaptureBufferStorage);
@@ -186,6 +205,63 @@ namespace Ryujinx.HLE.HOS
             AppletState.SetFocus(true);
 
             VsyncEvent = new KEvent(KernelContext);
+
+            // [Nextendo, HOME Menu work] What is kept per process for the HOME Menu belongs to one
+            // emulation: started a second time in the same window, the menu found the records
+            // of the first one under its own process id and the emulator went down.
+            Services.Vi.SystemSharedBuffer.Reset();
+            Services.Am.AppletAE.RealAppletManager.Reset();
+
+            // [Nextendo, HOME Menu work] The default avatar of Nextendo, same drawing and same
+            // tint per PID as the apps and the site (measures of profile_images/10151.jpg).
+            Ryujinx.Common.Configuration.NextendoImages.Silhouette ??= static (pid, side) =>
+            {
+                double shift = pid == 0 ? 0 : (unchecked((uint)pid * 2654435761u) % 360) / 360.0;
+
+                SkiaSharp.SKColor Tint(double h, double s, double v) =>
+                    SkiaSharp.SKColor.FromHsv((float)(((h + shift) % 1.0) * 360.0), (float)(s * 100), (float)(v * 100));
+
+                float c = side;
+
+                using SkiaSharp.SKBitmap bitmap = new(side, side, SkiaSharp.SKColorType.Rgba8888, SkiaSharp.SKAlphaType.Opaque);
+                using SkiaSharp.SKCanvas canvas = new(bitmap);
+                using SkiaSharp.SKPaint paint = new() { IsAntialias = true };
+
+                paint.Shader = SkiaSharp.SKShader.CreateLinearGradient(
+                    new SkiaSharp.SKPoint(0, 0), new SkiaSharp.SKPoint(c, c),
+                    new[] { Tint(0.213, 0.60, 0.80), Tint(0.290, 0.72, 0.55) }, null, SkiaSharp.SKShaderTileMode.Clamp);
+                canvas.DrawRect(0, 0, c, c, paint);
+                paint.Shader = null;
+                paint.Color = new SkiaSharp.SKColor(255, 255, 255, 47); // white at 18.5 %
+                canvas.DrawCircle(c * 127.5f / 256f, c * 101.5f / 256f, c * 46f / 256f, paint);
+                canvas.DrawOval(c * 127.5f / 256f, c * 208f / 256f, c * 66.5f / 256f, c * 54f / 256f, paint);
+                canvas.Flush();
+
+                using SkiaSharp.SKData encoded = bitmap.Encode(SkiaSharp.SKEncodedImageFormat.Jpeg, 92);
+
+                return encoded?.ToArray();
+            };
+
+            // [Nextendo, HOME Menu work] Pictures from Nextendo, in the form the console software reads.
+            Ryujinx.Common.Configuration.NextendoImages.SquareJpeg ??= static (image, side) =>
+            {
+                using SkiaSharp.SKBitmap source = SkiaSharp.SKBitmap.Decode(image);
+
+                if (source == null)
+                {
+                    return null;
+                }
+
+                if (source.Width == side && source.Height == side)
+                {
+                    return image;
+                }
+
+                using SkiaSharp.SKBitmap scaled = source.Resize(new SkiaSharp.SKImageInfo(side, side), SkiaSharp.SKFilterQuality.High);
+                using SkiaSharp.SKData encoded = scaled?.Encode(SkiaSharp.SKEncodedImageFormat.Jpeg, 90);
+
+                return encoded?.ToArray();
+            };
 
             DisplayResolutionChangeEvent = new KEvent(KernelContext);
 
@@ -321,6 +397,28 @@ namespace Ryujinx.HLE.HOS
 
         public void ChangeDockedModeState(bool newState)
         {
+            // [Nextendo, HOME Menu work] During the initial setup the Joy-Con are virtual: put in
+            // the dock, they are first taken off the console (the setup asks for it), then the
+            // console goes into the dock; taken out of the dock, they are put back on it.
+            if (Services.Hid.NpadDevices.VirtualJoyCons && newState != State.DockedMode)
+            {
+                if (newState)
+                {
+                    Services.Hid.NpadDevices.VirtualJoyConsDetached = true;
+
+                    System.Threading.Tasks.Task.Delay(1500).ContinueWith(_ => SetDockedMode(true));
+
+                    return;
+                }
+
+                Services.Hid.NpadDevices.VirtualJoyConsDetached = false;
+            }
+
+            SetDockedMode(newState);
+        }
+
+        private void SetDockedMode(bool newState)
+        {
             if (newState != State.DockedMode)
             {
                 State.DockedMode = newState;
@@ -334,6 +432,14 @@ namespace Ryujinx.HLE.HOS
 
                 Device.Configuration.RefreshInputConfig?.Invoke();
             }
+        }
+
+        /// <summary>
+        /// [Nextendo, HOME Menu work] The console's HOME button. False when no HOME Menu runs.
+        /// </summary>
+        public bool PressHomeButton()
+        {
+            return Services.Am.AppletAE.RealAppletManager.PressHome(Device);
         }
 
         public void ReturnFocus()
@@ -483,6 +589,11 @@ namespace Ryujinx.HLE.HOS
         public void SignalVsync()
         {
             VsyncEvent.ReadableEvent.Signal();
+
+            foreach (KEvent clientEvent in _clientVsyncEvents)
+            {
+                clientEvent.ReadableEvent.Signal();
+            }
         }
 
         /// <summary>

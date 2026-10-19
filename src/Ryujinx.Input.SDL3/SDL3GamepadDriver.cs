@@ -117,8 +117,31 @@ namespace Ryujinx.Input.SDL3
             return id;
         }
 
+        // [Nextendo] Controllers of the computer, for the emulator's notifications: one gone, one
+        // low on battery (by name). The keyboard is no controller here: it has neither.
+        public static event Action<string> NextendoControllerDisconnected;
+        // A controller plugged in or paired while the emulator runs (those found when it starts
+        // are not told).
+        public static event Action<string> NextendoControllerConnected;
+
+        private static readonly DateTime _nextendoSince = DateTime.UtcNow;
+        public static event Action<string, int> NextendoControllerBatteryLow;
+
+        private static readonly System.Collections.Concurrent.ConcurrentDictionary<SDL_JoystickID, string> _names = new();
+
+        /// <summary>The names of the controllers of the computer, as the system gives them.</summary>
+        public static System.Collections.Generic.ICollection<string> NextendoControllerNames => _names.Values;
+        private readonly System.Collections.Concurrent.ConcurrentDictionary<SDL_JoystickID, bool> _toldLow = new();
+
         private void HandleJoyStickDisconnected(SDL_JoystickID joystickInstanceId)
         {
+            if (_names.TryRemove(joystickInstanceId, out string name) && !string.IsNullOrEmpty(name))
+            {
+                NextendoControllerDisconnected?.Invoke(name);
+            }
+
+            _toldLow.TryRemove(joystickInstanceId, out _);
+
             bool joyConPairDisconnected = false;
             string fakeId = null;
 
@@ -195,6 +218,29 @@ namespace Ryujinx.Input.SDL3
 
                 if (_gamepadsInstanceIdsMapping.TryAdd(joystickInstanceId, id))
                 {
+                    _names[joystickInstanceId] = SDL_GetGamepadNameForID(joystickInstanceId);
+
+                    if (DateTime.UtcNow - _nextendoSince > TimeSpan.FromSeconds(10) && !string.IsNullOrEmpty(_names[joystickInstanceId]))
+                    {
+                        string plugged = _names[joystickInstanceId];
+
+                        if (SDL3JoyCon.IsJoyCon(joystickInstanceId))
+                        {
+                            // its colours first (read from it), away from the events of the controllers
+                            string path = SDL_GetGamepadPathForID(joystickInstanceId);
+
+                            System.Threading.Tasks.Task.Run(() =>
+                            {
+                                JoyConColors.Read(plugged, path);
+                                NextendoControllerConnected?.Invoke(plugged);
+                            });
+                        }
+                        else
+                        {
+                            NextendoControllerConnected?.Invoke(plugged);
+                        }
+                    }
+
                     lock (_lock)
                     {
                         if (!SDL3JoyCon.IsJoyCon(joystickInstanceId))
@@ -240,6 +286,38 @@ namespace Ryujinx.Input.SDL3
         {
             Logger.Info?.Print(LogClass.Hid,
                 $"{SDL_GetGamepadNameForID(joystickInstanceId)} power level: {powerLevel}");
+
+            if (powerLevel != SDL_PowerState.SDL_POWERSTATE_ON_BATTERY)
+            {
+                _toldLow.TryRemove(joystickInstanceId, out _);
+
+                return;
+            }
+
+            int percent = -1;
+
+            unsafe
+            {
+                SDL_Joystick* joystick = SDL_GetJoystickFromID(joystickInstanceId);
+
+                if (joystick != null)
+                {
+                    int level;
+
+                    SDL_GetJoystickPowerInfo(joystick, &level);
+                    percent = level;
+                }
+            }
+
+            // Told once under 15 %, again only after it went over 20 % (charged).
+            if (percent > 20)
+            {
+                _toldLow.TryRemove(joystickInstanceId, out _);
+            }
+            else if (percent >= 0 && percent <= 15 && _toldLow.TryAdd(joystickInstanceId, true))
+            {
+                NextendoControllerBatteryLow?.Invoke(SDL_GetGamepadNameForID(joystickInstanceId), percent);
+            }
         }
 
         protected virtual void Dispose(bool disposing)

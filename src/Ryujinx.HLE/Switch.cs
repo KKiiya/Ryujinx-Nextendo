@@ -93,6 +93,7 @@ namespace Ryujinx.HLE
             TamperMachine     = new TamperMachine();
 
             System.InitializeServices();
+            HOS.NextendoFriendProfile.Attach(this);
             System.State.SetLanguage(Configuration.SystemLanguage);
             System.State.SetRegion(Configuration.Region);
 
@@ -172,6 +173,63 @@ namespace Ryujinx.HLE
         public bool ConsumeFrameAvailable() => Gpu.Window.ConsumeFrameAvailable();
         public void PresentFrame(Action swapBuffersCallback) => Gpu.Window.Present(swapBuffersCallback);
         public void DisposeGpu() => Gpu.Dispose();
+
+        /// <summary>
+        /// [Nextendo, diagnostics] Writes to the log where every guest thread of every program is
+        /// (Nextendo menu): to see what a frozen HOME Menu waits for.
+        /// </summary>
+        /// <summary>
+        /// [Nextendo, HOME Menu work] Bytes of the memory of a running program (study): at an
+        /// address, or at an offset from the pointer found there.
+        /// </summary>
+        public byte[] PeekGuest(ulong titleId, ulong address, int size, long through = -1, byte[] write = null)
+        {
+            foreach (HOS.Kernel.Process.KProcess process in System.KernelContext.Processes.Values)
+            {
+                if (process.TitleId == titleId)
+                {
+                    try
+                    {
+                        if (through >= 0)
+                        {
+                            address = process.CpuMemory.Read<ulong>(address) + (ulong)through;
+                        }
+
+                        byte[] data = new byte[size];
+
+                        if (write != null)
+                        {
+                            process.CpuMemory.Write(address, write);
+                        }
+
+                        process.CpuMemory.Read(address, data);
+
+                        return data;
+                    }
+                    catch (global::System.Exception)
+                    {
+                        return null;
+                    }
+                }
+            }
+
+            return null;
+        }
+
+        public void DumpGuestThreads()
+        {
+            Common.Logging.Logger.Notice.Print(Common.Logging.LogClass.Application, "[diag] last requests:\n" + HOS.Services.IpcRecent.Dump());
+
+            foreach (HOS.Kernel.Process.KProcess process in System.KernelContext.Processes.Values)
+            {
+                string threads = process.DescribeGuestThreads();
+
+                if (threads.Length > 0)
+                {
+                    Common.Logging.Logger.Notice.Print(Common.Logging.LogClass.Application, $"[diag] process {process.Pid} {process.Name} ({process.TitleId:X16}):\n{threads}");
+                }
+            }
+        }
 
         public void Dispose()
         {

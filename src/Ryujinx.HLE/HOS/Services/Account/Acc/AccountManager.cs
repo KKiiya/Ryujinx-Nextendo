@@ -26,6 +26,9 @@ namespace Ryujinx.HLE.HOS.Services.Account.Acc
         private readonly ConcurrentDictionary<string, UserProfile> _profiles;
         private UserProfile[] _storedOpenedUsers;
 
+        // [Nextendo, HOME Menu work] Users being made by "Add User": edited, then kept or dropped.
+        private readonly ConcurrentDictionary<string, UserProfile> _pending = new();
+
         public UserProfile LastOpenedUser { get; private set; }
 
         public AccountManager(HorizonClient horizonClient, string initialProfileName = null)
@@ -37,7 +40,9 @@ namespace Ryujinx.HLE.HOS.Services.Account.Acc
 
             _accountSaveDataManager = new AccountSaveDataManager(_profiles);
 
-            if (!_profiles.TryGetValue(DefaultUserId.ToString(), out _))
+            // [Nextendo, HOME Menu work] The default user is made only when there is no user at all:
+            // the initial setup of the console takes it away once the player has made their own.
+            if (_profiles.IsEmpty)
             {
                 byte[] defaultUserImage = EmbeddedResources.Read("Ryujinx.HLE/HOS/Services/Account/Acc/DefaultUserImage.jpg");
 
@@ -57,7 +62,9 @@ namespace Ryujinx.HLE.HOS.Services.Account.Acc
                     }
                 }
 
-                OpenUser(commandLineUserProfileOverride.IsNull ? _accountSaveDataManager.LastOpened : commandLineUserProfileOverride);
+                UserId opened = commandLineUserProfileOverride.IsNull ? _accountSaveDataManager.LastOpened : commandLineUserProfileOverride;
+
+                OpenUser(_profiles.ContainsKey(opened.ToString()) ? opened : GetFirst().UserId);
             }
         }
 
@@ -149,8 +156,48 @@ namespace Ryujinx.HLE.HOS.Services.Account.Acc
             _accountSaveDataManager.Save(_profiles);
         }
 
+        public UserId BeginUserRegistration()
+        {
+            UserId userId = new(Guid.NewGuid().ToString("N"));
+
+            _pending[userId.ToString()] = new UserProfile(userId, "", []);
+
+            return userId;
+        }
+
+        public bool CompleteUserRegistration(UserId userId)
+        {
+            if (!_pending.TryRemove(userId.ToString(), out UserProfile profile))
+            {
+                return _profiles.ContainsKey(userId.ToString());
+            }
+
+            AddUser(profile.Name, profile.Image, userId);
+
+            Logger.Info?.Print(LogClass.ServiceAcc, $"[acc] user {userId} ({profile.Name}) added from the HOME Menu");
+
+            return true;
+        }
+
+        public void CancelUserRegistration(UserId userId)
+        {
+            _pending.TryRemove(userId.ToString(), out _);
+        }
+
+        internal bool TryGetPendingUser(UserId userId, out UserProfile profile)
+        {
+            return _pending.TryGetValue(userId.ToString(), out profile);
+        }
+
         public void SetUserImage(UserId userId, byte[] image)
         {
+            if (_pending.TryGetValue(userId.ToString(), out UserProfile pending))
+            {
+                pending.Image = image;
+
+                return;
+            }
+
             foreach (UserProfile userProfile in GetAllUsers())
             {
                 if (userProfile.UserId == userId)
@@ -166,6 +213,13 @@ namespace Ryujinx.HLE.HOS.Services.Account.Acc
 
         public void SetUserName(UserId userId, string name)
         {
+            if (_pending.TryGetValue(userId.ToString(), out UserProfile pending))
+            {
+                pending.Name = name;
+
+                return;
+            }
+
             foreach (UserProfile userProfile in GetAllUsers())
             {
                 if (userProfile.UserId == userId)
@@ -181,13 +235,37 @@ namespace Ryujinx.HLE.HOS.Services.Account.Acc
 
         public void DeleteUser(UserId userId)
         {
-            DeleteSaveData(userId);
+            try
+            {
+                DeleteSaveData(userId);
+            }
+            catch (Exception e)
+            {
+                Logger.Warning?.Print(LogClass.ServiceAcc, $"[acc] saves of {userId} not all deleted: {e.Message}");
+            }
 
             _profiles.Remove(userId.ToString(), out _);
 
-            OpenUser(DefaultUserId);
+            if (LastOpenedUser == null || LastOpenedUser.UserId == userId)
+            {
+                OpenUser(_profiles.ContainsKey(DefaultUserId.ToString()) || _profiles.IsEmpty ? DefaultUserId : GetFirst().UserId);
+            }
 
             _accountSaveDataManager.Save(_profiles);
+        }
+
+        public void DeleteUserSaveData(UserId userId)
+        {
+            try
+            {
+                DeleteSaveData(userId);
+
+                Logger.Info?.Print(LogClass.ServiceAcc, $"[acc] saves of {userId} deleted");
+            }
+            catch (Exception e)
+            {
+                Logger.Warning?.Print(LogClass.ServiceAcc, $"[acc] saves of {userId} not all deleted: {e.Message}");
+            }
         }
 
         private void DeleteSaveData(UserId userId)
@@ -219,17 +297,111 @@ namespace Ryujinx.HLE.HOS.Services.Account.Acc
 
         internal int GetUserCount()
         {
-            return _profiles.Count;
+            return _profiles.Count - (IsHidden(_hiddenDuringSetup) ? 1 : 0);
         }
 
         internal bool TryGetUser(UserId userId, out UserProfile profile)
         {
+            if (userId == _hiddenDuringSetup && IsHidden(userId))
+            {
+                profile = null;
+
+                return false;
+            }
+
             return _profiles.TryGetValue(userId.ToString(), out profile);
+        }
+
+        // [Nextendo, HOME Menu work] The initial setup on a new console: the user the emulator made
+        // by itself (RyuPlayer) is not shown, so the setup asks for the player's own user; once
+        // the setup is over with a user of the player's, the default one goes away.
+        private UserId _hiddenDuringSetup;
+
+        private bool IsHidden(UserId userId) => !userId.IsNull && _profiles.ContainsKey(userId.ToString());
+
+        /// <summary>The initial setup starts: the default user the emulator made by itself is not shown.</summary>
+        public void HideDefaultUserForSetup()
+        {
+            if (_profiles.TryGetValue(DefaultUserId.ToString(), out UserProfile only) && only.Name == "RyuPlayer")
+            {
+                _hiddenDuringSetup = DefaultUserId;
+
+                Logger.Info?.Print(LogClass.ServiceAcc, "[setup] default user hidden during the initial setup");
+            }
+        }
+
+        /// <summary>The initial setup is over: the default user goes when the player made one.</summary>
+        public void EndSetup()
+        {
+            UserId hidden = _hiddenDuringSetup;
+
+            _hiddenDuringSetup = default;
+
+            if (!hidden.IsNull && _profiles.Count > 1 && _profiles.ContainsKey(hidden.ToString()))
+            {
+                _profiles.Remove(hidden.ToString(), out _);
+
+                if (LastOpenedUser == null || LastOpenedUser.UserId == hidden)
+                {
+                    OpenUser(GetFirst().UserId);
+                }
+
+                _accountSaveDataManager.Save(_profiles);
+
+                Logger.Info?.Print(LogClass.ServiceAcc, "[setup] default user removed: the player made their own");
+            }
         }
 
         public IEnumerable<UserProfile> GetAllUsers()
         {
-            return _profiles.Values;
+            List<string> order = UserOrder();
+
+            return _profiles.Values.Where(profile => !(profile.UserId == _hiddenDuringSetup && IsHidden(profile.UserId))).OrderBy(profile =>
+            {
+                int index = order.IndexOf(profile.UserId.ToString());
+
+                return index < 0 ? int.MaxValue : index;
+            });
+        }
+
+        // [Nextendo, HOME Menu work] The order of the users ("Change Order" of the HOME Menu).
+        private static string UserOrderPath => System.IO.Path.Combine(Ryujinx.Common.Configuration.AppDataManager.BaseDirPath, "nextendo_user_order.txt");
+
+        private List<string> _userOrder;
+
+        private List<string> UserOrder()
+        {
+            if (_userOrder == null)
+            {
+                try
+                {
+                    _userOrder = System.IO.File.Exists(UserOrderPath) ? System.IO.File.ReadAllLines(UserOrderPath).Where(x => x.Length > 0).ToList() : [];
+                }
+                catch (Exception)
+                {
+                    _userOrder = [];
+                }
+            }
+
+            return _userOrder;
+        }
+
+        public void SetUserPosition(UserId userId, int position)
+        {
+            List<string> order = GetAllUsers().Select(profile => profile.UserId.ToString()).ToList();
+
+            order.Remove(userId.ToString());
+            order.Insert(Math.Clamp(position, 0, order.Count), userId.ToString());
+            _userOrder = order;
+
+            try
+            {
+                System.IO.File.WriteAllLines(UserOrderPath, order);
+            }
+            catch (Exception e)
+            {
+                Logger.Warning?.Print(LogClass.ServiceAcc, $"[acc] order of the users not kept: {e.Message}");
+            }
         }
 
         internal IEnumerable<UserProfile> GetOpenedUsers()

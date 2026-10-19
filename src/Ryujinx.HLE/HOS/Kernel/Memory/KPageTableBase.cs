@@ -986,6 +986,64 @@ namespace Ryujinx.HLE.HOS.Kernel.Memory
             }
         }
 
+        /// <summary>
+        /// [Nextendo] Gives back to its pool the memory a process that ended still holds (its
+        /// code, heap and stacks). Nothing did: one program ran for the whole session. With
+        /// programs started and ended next to the HOME Menu, the pool emptied after the first.
+        /// </summary>
+        public ulong ReleaseOwnedMemory()
+        {
+            ulong released = 0;
+
+            lock (_blockManager)
+            {
+                System.Collections.Generic.List<(ulong Address, ulong Size)> owned = new();
+
+                ulong address = AddrSpaceStart;
+
+                while (address < AddrSpaceEnd)
+                {
+                    KMemoryInfo info = _blockManager.FindBlock(address).GetInfo();
+
+                    ulong blockAddress = info.Address;
+                    ulong blockSize = info.Size;
+
+                    // Also what the graphics processor still had mapped (a game's heap always has
+                    // some): the process is over and its commands are done. Kept, a game started
+                    // again found its heap short of that much (SetHeapSize OutOfMemory, then a crash).
+                    // What services borrowed too (transfer memory: closed later, they give nothing back
+                    // from a program that ended, see KTransferMemory). Not what an IPC request in
+                    // flight holds.
+                    if (info.State is MemoryState.Heap or MemoryState.CodeStatic or MemoryState.CodeMutable or MemoryState.Stack &&
+                        info.IpcRefCount == 0 && (info.Attribute & MemoryAttribute.IpcMapped) == 0)
+                    {
+                        owned.Add((blockAddress, blockSize));
+                    }
+
+                    if (blockSize == 0 || blockAddress + blockSize <= address)
+                    {
+                        break;
+                    }
+
+                    address = blockAddress + blockSize;
+                }
+
+                foreach ((ulong blockAddress, ulong blockSize) in owned)
+                {
+                    ulong pagesCount = blockSize / PageSize;
+
+                    if (Unmap(blockAddress, pagesCount) == Result.Success)
+                    {
+                        _blockManager.InsertBlock(blockAddress, pagesCount, MemoryState.Unmapped);
+
+                        released += blockSize;
+                    }
+                }
+            }
+
+            return released;
+        }
+
         public KMemoryInfo QueryMemory(ulong address)
         {
             if (address >= AddrSpaceStart &&

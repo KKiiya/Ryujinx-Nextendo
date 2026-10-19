@@ -208,6 +208,7 @@
                     <MenuItem
                         Name="MiiEditorMenuItem" Header="{ext:Locale MenuBar_Actions_MiiEditorButton}" Icon="{ext:Icon fa-solid fa-face-grin-wide}" />
                     <MenuItem Name="XCITrimmerMenuItem" Header="{ext:Locale MenuBar_Actions_XCITrimmerButton}" Icon="{ext:Icon fa-solid fa-scissors}" />
+                    <MenuItem Name="HomeMenuMenuItem" Header="{ext:Locale Dialog_Nextendo_HomeMenuName}" Icon="{ext:Icon fa-solid fa-house}" />
                 </MenuItem>
                 <Separator />
             </MenuItem>
@@ -219,6 +220,10 @@
                     Name="NextendoLoginMenuItem"
                     Header="{ext:Locale Dialog_Nextendo_NextendoAccountMenuHeader}"
                     Icon="{ext:Icon fa-solid fa-user-astronaut}" />
+                <MenuItem
+                    Name="NextendoHomeMenuSettingsMenuItem"
+                    Header="qLaunch"
+                    Icon="{ext:Icon fa-solid fa-house}" />
                 <MenuItem
                     Name="NextendoFriendsMenuItem"
                     Header="{ext:Locale Dialog_Nextendo_MenuBarFriends}"
@@ -232,7 +237,12 @@
                     Name="NextendoRecentMenuItem"
                     Header="{ext:Locale Dialog_Nextendo_MenuBarRecent}"
                     Icon="{ext:Icon fa-solid fa-clock-rotate-left}" />
+                <MenuItem
+                    Name="NextendoDiagnosticMenuItem"
+                    Header="Diagnostic (gel de la console)"
+                    Icon="{ext:Icon fa-solid fa-stethoscope}" />
                 <Separator />
+                <MenuItem Header="Refresh service information" Command="{Binding RefreshServiceInformationCommand}" Icon="{ext:Icon fa-solid fa-arrows-rotate}" />
                 <MenuItem
                     Name="NextendoReportMenuItem"
                     Header="{ext:Locale Dialog_Nextendo_MenuBarReport}"
@@ -301,6 +311,22 @@
                         Header="{ext:Locale MenuBarHelpFaq}"
                         Icon="{ext:Icon fa-solid fa-circle-info}"
                         CommandParameter="{x:Static common:SharedConstants.FaqWikiUrl}" />
+                    <Separator />
+                    <MenuItem
+                        Name="NextendoWikiMenuItem"
+                        Header="{ext:Locale Dialog_Nextendo_HelpNextendoWiki}"
+                        Icon="{ext:Icon fa-solid fa-book}"
+                        CommandParameter="https://wiki.nextendo.network/" />
+                    <MenuItem
+                        Name="NextendoWebsiteMenuItem"
+                        Header="{ext:Locale Dialog_Nextendo_HelpNextendoWebsite}"
+                        Icon="{ext:Icon fa-solid fa-globe}"
+                        CommandParameter="https://nextendo.network/" />
+                    <MenuItem
+                        Name="NextendoDiscordMenuItem"
+                        Header="{ext:Locale Dialog_Nextendo_HelpNextendoDiscord}"
+                        Icon="{ext:Icon fa-brands fa-discord}"
+                        CommandParameter="https://discord.gg/XPfeCMwnzQ" />
                 </MenuItem>
                 <Separator />
                 <MenuItem

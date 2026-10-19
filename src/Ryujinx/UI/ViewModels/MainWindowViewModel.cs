@@ -121,6 +121,9 @@ namespace Ryujinx.Ava.UI.ViewModels
         [ObservableProperty] public partial Brush VSyncModeColor { get; set; }
 #nullable enable
         [ObservableProperty] public partial byte[]? SelectedIcon { get; set; }
+
+        // Frame of the icon on the loading screen: square for a game, rounded for the HOME Menu's own icon.
+        [ObservableProperty] public partial Avalonia.CornerRadius LoadIconRadius { get; set; } = new(3);
 #nullable disable
         [ObservableProperty] public partial int StatusBarProgressMaximum { get; set; }
 
@@ -243,6 +246,93 @@ namespace Ryujinx.Ava.UI.ViewModels
         {
             Applications = [];
 
+            // [Nextendo, HOME Menu work] A program asks the console to restart or to turn off
+            // (a homebrew's reboot button, the power menu): the emulation restarts or stops.
+            // [Nextendo, HOME Menu work] The initial setup is over: the emulator starts again, on the
+            // HOME Menu, with the same command line (a new process: a restart inside this one does
+            // not get through the end of the emulation).
+            Ryujinx.HLE.HOS.HomeMenuStatus.RelaunchRequested += () => Dispatcher.UIThread.Post(() =>
+            {
+                List<string> arguments = Environment.GetCommandLineArgs().Skip(1).ToList();
+
+                if (!arguments.Contains("@home-menu"))
+                {
+                    arguments.Add("@home-menu");
+                }
+
+                System.Diagnostics.ProcessStartInfo start = new(Environment.ProcessPath ?? "Ryujinx.exe")
+                {
+                    UseShellExecute = false,
+                    WorkingDirectory = AppContext.BaseDirectory,
+                };
+
+                foreach (string argument in arguments)
+                {
+                    start.ArgumentList.Add(argument);
+                }
+
+                Logger.Notice.Print(LogClass.Application, $"[setup] starting again: {string.Join(' ', arguments)}");
+
+                System.Diagnostics.Process.Start(start);
+                System.Diagnostics.Process.GetCurrentProcess().Kill();
+            });
+
+            Ryujinx.HLE.HOS.HomeMenuStatus.SleepRequested += () => AppHost?.Sleep();
+
+            Ryujinx.HLE.HOS.HomeMenuStatus.PowerRequested += reboot => Dispatcher.UIThread.Post(() =>
+            {
+                if (reboot)
+                {
+                    RestartEmulation();
+                }
+                else
+                {
+                    AppHost?.Stop();
+                }
+            });
+
+            // [Nextendo, HOME Menu work] The language chosen in the HOME Menu is the one of the emulator.
+            Ryujinx.Common.Configuration.NextendoSystemSettings.LanguageChanged += language => Dispatcher.UIThread.Post(() =>
+            {
+                ConfigurationState.Instance.System.Language.Value = (Ryujinx.Ava.Systems.Configuration.System.Language)language;
+                ConfigurationState.Instance.ToFileFormat().SaveConfig(Program.ConfigurationPath);
+            });
+
+            // [Nextendo, HOME Menu work] The emulator's settings in the HOME Menu's settings.
+            Ryujinx.Ava.Common.NextendoHomeMenuSettings.Register();
+
+            // [Nextendo, HOME Menu work] Region, date and time, time zone: the HOME Menu's are the emulator's.
+            Ryujinx.Common.Configuration.NextendoSystemSettings.RegionChanged += region => Dispatcher.UIThread.Post(() =>
+            {
+                ConfigurationState.Instance.System.Region.Value = (Ryujinx.Ava.Systems.Configuration.System.Region)region;
+                ConfigurationState.Instance.ToFileFormat().SaveConfig(Program.ConfigurationPath);
+            });
+
+            Ryujinx.Common.Configuration.NextendoSystemSettings.TimeOffsetChanged += offset => Dispatcher.UIThread.Post(() =>
+            {
+                ConfigurationState.Instance.System.SystemTimeOffset.Value = offset;
+                ConfigurationState.Instance.System.MatchSystemTime.Value = false;
+                ConfigurationState.Instance.ToFileFormat().SaveConfig(Program.ConfigurationPath);
+            });
+
+            Ryujinx.Common.Configuration.NextendoSystemSettings.AutomaticTimeChanged += enabled => Dispatcher.UIThread.Post(() =>
+            {
+                ConfigurationState.Instance.System.MatchSystemTime.Value = enabled;
+
+                if (enabled)
+                {
+                    ConfigurationState.Instance.System.SystemTimeOffset.Value = 0;
+                }
+
+                ConfigurationState.Instance.ToFileFormat().SaveConfig(Program.ConfigurationPath);
+            });
+
+            Ryujinx.Common.Configuration.NextendoSystemSettings.TimeZoneChanged += location => Dispatcher.UIThread.Post(() =>
+            {
+                ConfigurationState.Instance.System.TimeZone.Value = location;
+                ConfigurationState.Instance.ToFileFormat().SaveConfig(Program.ConfigurationPath);
+            });
+
             Applications.ToObservableChangeSet()
                 .Filter(Filter)
                 .Sort(GetComparer())
@@ -337,6 +427,9 @@ namespace Ryujinx.Ava.UI.ViewModels
             // [Nextendo] Start polling the live "N players online" counts now the library exists;
             // the badge next to each supported game reads them.
             Ryujinx.Ava.Common.NextendoOnlineCounts.Start(applicationLibrary);
+
+            // Additional remote display metadata for titles absent from the built-in table.
+            Ryujinx.Ava.Common.NextendoServiceCatalog.Start(applicationLibrary, () => !IsGameRunning && WindowState != WindowState.Minimized);
 
             // [Nextendo] And the Discord-style avatars of friends currently playing each game,
             // shown as overlapping round pictures on the right of the game row.
@@ -1476,6 +1569,10 @@ namespace Ryujinx.Ava.UI.ViewModels
 
             _rendererWaitEvent.WaitOne();
 
+            // IsGameRunning is set by AppHost.Start below, on the UI thread, once the renderer
+            // exists: it gates the Nextendo overlay, the runtime-only dashboard categories and
+            // gamepad remapping.
+
             AppHost?.Start();
 
             AppHost?.DisposeContext();
@@ -2031,6 +2128,34 @@ namespace Ryujinx.Ava.UI.ViewModels
                 return;
             }
 
+            // [Nextendo] Plusieurs comptes Nextendo : qui joue ? (un seul compte = pris d'office,
+            // et c'est son profil qui lance le jeu). Pas pour le menu HOME : l'utilisateur y est
+            // choisi dans le menu lui-meme, et son compte suit (IManagerForApplication).
+            if (application.Id != 0x0100000000001000 && !await NextendoAccountPicker.EnsureChosen())
+            {
+                return;
+            }
+
+            // [Nextendo] Pseudo et photo du compte recopies sur le profil local AVANT que le jeu
+            // demarre. Les jeux lisent le pseudo du profil (nn::account::GetNickname) : Mario Kart
+            // 8 Deluxe le met dans son profil en ligne et l'annonce aux autres joueurs. Jusqu'ici
+            // cette recopie ne se faisait qu'au lancement du menu HOME, dans la vue carrousel, les
+            // reglages ou la fenetre d'amis : un joueur qui lancait le jeu depuis la liste gardait
+            // l'ancien pseudo apres l'avoir change sur le site. 3 s au plus, le jeu demarre quand
+            // meme (profil local tel quel) si le serveur ne repond pas.
+            if (application.Id != 0x0100000000001000 && Ryujinx.Common.Configuration.NextendoAccount.IsLinked
+                && !NextendoServerOverride.HorsNextendo)
+            {
+                try
+                {
+                    await Task.WhenAny(Ryujinx.Ava.Common.NextendoApi.GetProfileSyncAsync(), Task.Delay(3000));
+                }
+                catch
+                {
+                    // hors d'atteinte : le profil local tel qu'il est
+                }
+            }
+
             // [Nextendo] Splatoon 3 : prevenir AVANT le lancement que les mods installes seront
             // ignores.
             //
@@ -2072,7 +2197,18 @@ namespace Ryujinx.Ava.UI.ViewModels
             // compte chez NOUS. Quelqu'un qui joue sur son propre serveur n'a rien à voir avec
             // ces conditions, et les lui appliquer reviendrait à l'empêcher de jouer au nom
             // d'un service qu'il a justement désactivé.
-            if (application.IsNextendoCompatible && !NextendoServerOverride.HorsNextendo)
+            Ryujinx.Ava.Common.ServiceLaunchPolicy.ResetOnlineBlock();
+            Ryujinx.Ava.Common.NextendoSaveSync.Playing = null;
+            Ryujinx.Ava.Common.ServiceLaunchDecision serviceLaunch = Ryujinx.Ava.Common.ServiceLaunchDecision.Unmanaged;
+            // [Nextendo, HOME Menu work] System titles (firmware applets, qlaunch) are not games:
+            // no service catalog entry can exist for them, so no online check applies.
+            bool systemTitle = application.Id is >= 0x0100000000000000 and <= 0x0100000000001FFF;
+            Logger.Notice.Print(LogClass.Application, $"[home-menu] LoadApplication reached the online gate, id={application.Id:x16} system={systemTitle}");
+            if (!application.IsNextendoCompatible && !NextendoServerOverride.HorsNextendo && !systemTitle)
+            {
+                serviceLaunch = await Ryujinx.Ava.Common.NextendoServiceCatalog.EvaluateLaunchAsync(application);
+            }
+            if ((application.IsNextendoCompatible || serviceLaunch.Managed) && !NextendoServerOverride.HorsNextendo)
             {
                 // Evaluate the gate FRESH every launch — OnlineBlocked is runtime-only, so reset
                 // it first or a stale "blocked" from a previous launch (or a since-created guest)
@@ -2087,10 +2223,12 @@ namespace Ryujinx.Ava.UI.ViewModels
                 }
 
                 Ryujinx.Ava.Common.NextendoBeta.BlockReason remote = Ryujinx.Ava.Common.NextendoBeta.Evaluate();
-                bool versionBad = !application.IsNextendoVersionOk;
+                bool versionBad = application.IsNextendoCompatible
+                    ? !application.IsNextendoVersionOk : serviceLaunch.VersionMismatch;
+                bool requirementsBad = !application.IsNextendoCompatible && !serviceLaunch.OnlineAllowed;
 
-                Ryujinx.Common.Configuration.NextendoAccount.OnlineBlocked =
-                    remote != Ryujinx.Ava.Common.NextendoBeta.BlockReason.None || versionBad;
+                Ryujinx.Ava.Common.ServiceLaunchPolicy.UpdateOnlineBlock(
+                    remote != Ryujinx.Ava.Common.NextendoBeta.BlockReason.None, versionBad, serviceLaunch);
 
                 // Refresh the remote config for the NEXT launch (a flipped kill-switch applies then).
                 _ = Ryujinx.Ava.Common.NextendoBeta.RefreshAsync();
@@ -2115,7 +2253,12 @@ namespace Ryujinx.Ava.UI.ViewModels
                     {
                         problems.Add("• " + LocaleManager.GetFormatted(
                             LocaleKeys.Dialog_Nextendo_OnlineProblemVersion,
-                            application.Version, application.NextendoCompatibleVersion));
+                            application.Version, application.IsNextendoCompatible ? application.NextendoCompatibleVersion : serviceLaunch.RequiredVersions));
+                    }
+
+                    if (requirementsBad && !versionBad)
+                    {
+                        problems.Add("• " + serviceLaunch.Message);
                     }
 
                     if (!Ryujinx.Common.Configuration.NextendoAccount.IsLinked)
@@ -2156,7 +2299,7 @@ namespace Ryujinx.Ava.UI.ViewModels
             // [Nextendo] Download this title's cloud save and apply it BEFORE the game
             // runs (compatible titles only; only meaningful because the user owns + is
             // launching this game).
-            if (application.IsNextendoVersionOk && Ryujinx.Common.Configuration.NextendoAccount.IsLinked)
+            if (application.CanUseNextendoCloudSaves && Ryujinx.Common.Configuration.NextendoAccount.IsLinked)
             {
                 // [Nextendo] If the local save folder is EMPTY but the account has a cloud save,
                 // ask the player (Switch-style) before starting: download it, or launch anyway with
@@ -2279,6 +2422,14 @@ namespace Ryujinx.Ava.UI.ViewModels
 
             application.Name ??= AppHost.Device.Processes.ActiveApplication.Name;
             
+            // [Nextendo] The HOME Menu keeps its own picture on the loading screen however it is
+            // started (menu entry, command line, or a restart of the emulation).
+            if (application.Id == 0x0100000000001000)
+            {
+                SelectedIcon = Ryujinx.Common.EmbeddedResources.Read("Ryujinx/Assets.UIImages.Icon_HomeMenu.png");
+                LoadIconRadius = new Avalonia.CornerRadius(36);
+            }
+
             SelectedIcon ??= ApplicationLibrary.GetApplicationIcon(application.Path,
                 ConfigurationState.Instance.System.Language, application.Id);
 
@@ -2296,10 +2447,10 @@ namespace Ryujinx.Ava.UI.ViewModels
             // First push after 60s, then every 3 min. Disposed on exit.
             _nextendoSaveTimer?.Dispose();
             _nextendoSaveTimer = null;
-            if (application.IsNextendoVersionOk && Ryujinx.Common.Configuration.NextendoAccount.IsLinked)
+            if (application.CanUseNextendoCloudSaves && Ryujinx.Common.Configuration.NextendoAccount.IsLinked)
             {
                 // Track the playing title so the crash handler can push its save best-effort.
-                Ryujinx.Ava.Common.NextendoSaveSync.Playing = (application.Id, application.IdString);
+                Ryujinx.Ava.Common.NextendoSaveSync.Playing = application;
                 _nextendoSaveTimer = new System.Threading.Timer(
                     _ => { if (IsGameRunning) { _ = FlushNextendoSaveAsync(); } },
                     null, TimeSpan.FromSeconds(60), TimeSpan.FromMinutes(3));
@@ -2317,6 +2468,7 @@ namespace Ryujinx.Ava.UI.ViewModels
                 SetMainContent(RendererHostControl);
 
                 RendererHostControl.Focus();
+
             });
 
         public static void UpdateGameMetadata(string titleId, TimeSpan playTime) 
@@ -2357,14 +2509,14 @@ namespace Ryujinx.Ava.UI.ViewModels
         public async Task FlushNextendoSaveAsync()
         {
             ApplicationData app = _currentApplicationData;
-            if (app != null && app.IsNextendoVersionOk && Ryujinx.Common.Configuration.NextendoAccount.IsLinked)
+            if (app != null && app.CanUseNextendoCloudSaves && Ryujinx.Common.Configuration.NextendoAccount.IsLinked)
             {
-                await Ryujinx.Ava.Common.NextendoSaveSync.PushAsync(app.Id, app.IdString);
+                await Ryujinx.Ava.Common.NextendoSaveSync.PushAsync(app);
             }
             else
             {
                 Logger.Info?.Print(LogClass.Application,
-                    $"[Nextendo] close-flush skipped (app={app?.Name ?? "null"} versionOk={app?.IsNextendoVersionOk} linked={Ryujinx.Common.Configuration.NextendoAccount.IsLinked})");
+                    $"[Nextendo] close-flush skipped (app={app?.Name ?? "null"} cloudEligible={app?.CanUseNextendoCloudSaves} linked={Ryujinx.Common.Configuration.NextendoAccount.IsLinked})");
             }
         }
 
@@ -2390,6 +2542,8 @@ namespace Ryujinx.Ava.UI.ViewModels
                 ShowLoadProgress = false;
                 IsLoadingIndeterminate = false;
                 CanUpdate = true;
+
+                Window?.RevealAfterBackgroundLoad();
                 Cursor = Cursor.Default;
 
                 SetMainContent(null);
@@ -2412,6 +2566,7 @@ namespace Ryujinx.Ava.UI.ViewModels
             RendererHostControl = null;
 
             SelectedIcon = null;
+            LoadIconRadius = new Avalonia.CornerRadius(3);
 
             Dispatcher.UIThread.InvokeAsync(() =>
             {
@@ -2423,13 +2578,18 @@ namespace Ryujinx.Ava.UI.ViewModels
         /// [Nextendo] Ctrl+F, and the Nextendo > Friends menu entry. Non-modal on purpose so it can
         /// be opened, read and left open while a game keeps running.
         /// </summary>
-        public void OpenNextendoFriends() => NextendoFriendsWindow.Open();
+        public async void OpenNextendoFriends()
+        {
+            if (await NextendoAccountPicker.EnsureChosen())
+            {
+                NextendoFriendsWindow.Open();
+            }
+        }
 
         /// <summary>
-        /// [Nextendo] Ctrl+F now opens the launcher profile dialog (the circular profile
-        /// button), which floats above a running game the same way the friends window did.
+        /// [Nextendo] Ctrl+F toggles the in-window dashboard over the game renderer.
         /// </summary>
-        public void OpenNextendoProfile() => RyujinxApp.MainWindow.ApplicationCarousel?.OpenNextendoProfile();
+        public void OpenNextendoProfile() => Window?.ToggleNextendoDashboard();
 
         public async Task OpenAmiiboWindow()
         {

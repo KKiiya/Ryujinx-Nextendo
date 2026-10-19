@@ -10,6 +10,21 @@ namespace Ryujinx.HLE.HOS.Services.Am.AppletAE.AllSystemAppletProxiesService.Sys
 {
     class ISelfController : IpcService
     {
+        // [Nextendo, HOME Menu work]
+        [CommandCmif(60)]
+        // OverrideAutoSleepTimeAndDimmingTime(s32, s32, s32, s32)
+        public ResultCode OverrideAutoSleepTimeAndDimmingTime(ServiceCtx context)
+        {
+            return ResultCode.Success;
+        }
+
+        [CommandCmif(72)] // 9.0.0+
+        // SetInputDetectionPolicy(u32)
+        public ResultCode SetInputDetectionPolicy(ServiceCtx context)
+        {
+            return ResultCode.Success;
+        }
+
         private readonly ulong _pid;
 
         private readonly KEvent _libraryAppletLaunchableEvent;
@@ -53,6 +68,25 @@ namespace Ryujinx.HLE.HOS.Services.Am.AppletAE.AllSystemAppletProxiesService.Sys
         public ResultCode Exit(ServiceCtx context)
         {
             Logger.Stub?.PrintStub(LogClass.ServiceAm);
+
+            // [Nextendo, HOME Menu work] A homebrew that leaves this way (Switchfin, other borealis
+            // programs) then waits for the system to end it, as a console does. Left alone it
+            // waited forever and the album froze. It is ended once this reply is out, and the
+            // homebrew menu comes back.
+            context.Device.System.KernelContext.Processes.TryGetValue(_pid, out Ryujinx.HLE.HOS.Kernel.Process.KProcess process);
+
+            Logger.Info?.Print(LogClass.ServiceAm, $"[proc] Exit asked by process {_pid} ({process?.Name}), homebrew area 0x{process?.HomebrewArea ?? 0:X}");
+
+            if (process is { HomebrewArea: not 0 })
+            {
+                process.ReadHomebrewNextLoad();
+
+                System.Threading.Tasks.Task.Run(async () =>
+                {
+                    await System.Threading.Tasks.Task.Delay(50);
+                    process.Terminate();
+                });
+            }
 
             return ResultCode.Success;
         }
@@ -236,9 +270,50 @@ namespace Ryujinx.HLE.HOS.Services.Am.AppletAE.AllSystemAppletProxiesService.Sys
         // IsSystemBufferSharingEnabled()
         public ResultCode IsSystemBufferSharingEnabled(ServiceCtx context)
         {
-            // NOTE: Service checks a private field and return an error if the SystemBufferSharing is disabled.
+            // System applets (the HOME Menu) draw into frame buffers shared with the system
+            // instead of allocating their own: answering "disabled" pushes them onto a fallback
+            // that takes several MiB out of their fixed memory budget.
+            bool systemApplet = context.Device.Processes.GetProcess(_pid)?.ProgramId is >= 0x0100000000001000 and <= 0x0100000000001FFF;
 
-            return ResultCode.NotImplemented;
+            if (!systemApplet || System.Environment.GetEnvironmentVariable("NEXTENDO_SHARED_FB") != "1")
+            {
+                return ResultCode.NotImplemented;
+            }
+
+            return ResultCode.Success;
+        }
+
+        [CommandCmif(42)] // 4.0.0+
+        // GetSystemSharedLayerHandle() -> (nn::vi::fbshare::SharedBufferHandle, nn::vi::fbshare::SharedLayerHandle)
+        public ResultCode GetSystemSharedLayerHandle(ServiceCtx context)
+        {
+            Ryujinx.HLE.HOS.Services.Vi.SystemSharedBuffer shared = Ryujinx.HLE.HOS.Services.Vi.SystemSharedBuffer.EnsureSession(context, _pid);
+
+            if (shared == null)
+            {
+                return ResultCode.NotImplemented;
+            }
+
+            context.ResponseData.Write(shared.BufferHandle);
+            context.ResponseData.Write((ulong)shared.LayerId);
+
+            return ResultCode.Success;
+        }
+
+        [CommandCmif(43)] // 5.0.0+
+        // GetSystemSharedBufferHandle() -> nn::vi::fbshare::SharedBufferHandle
+        public ResultCode GetSystemSharedBufferHandle(ServiceCtx context)
+        {
+            Ryujinx.HLE.HOS.Services.Vi.SystemSharedBuffer shared = Ryujinx.HLE.HOS.Services.Vi.SystemSharedBuffer.EnsureSession(context, _pid);
+
+            if (shared == null)
+            {
+                return ResultCode.NotImplemented;
+            }
+
+            context.ResponseData.Write(shared.BufferHandle);
+
+            return ResultCode.Success;
         }
 
         [CommandCmif(44)] // 10.0.0+

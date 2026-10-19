@@ -28,7 +28,7 @@ namespace Ryujinx.Ava.Systems.AppLibrary
     // [Nextendo] INotifyPropertyChanged is implemented for ONE reason: the live "N players
     // online" badge. Everything else here is set once at scan time, but the player count changes
     // while the list is on screen, and a plain property would bind once and never update.
-    public class ApplicationData : System.ComponentModel.INotifyPropertyChanged
+    public partial class ApplicationData : System.ComponentModel.INotifyPropertyChanged
     {
         public event System.ComponentModel.PropertyChangedEventHandler PropertyChanged;
 
@@ -360,10 +360,13 @@ namespace Ryujinx.Ava.Systems.AppLibrary
         [JsonIgnore]
         public bool IsNextendoCompatible => !string.IsNullOrEmpty(NextendoCompatibleVersion);
 
-        // The single game version Nextendo Network currently supports for this title.
-        // A different version can't reach the Nextendo servers (different NEX access key).
+        // The single game version Nextendo Network currently supports for this title: the
+        // installed version must be exactly this one, neither older nor newer (see IsNextendoVersionOk).
         [JsonIgnore]
-        public string NextendoCompatibleVersion => IdBaseString switch
+        public string NextendoCompatibleVersion => NextendoVersionFor(IdBaseString);
+
+        // Same table, reachable without an ApplicationData (the compatibility list uses it).
+        public static string NextendoVersionFor(string idBase) => idBase switch
         {
             // [Nextendo 2026-09-07] 4.0.0, publiee le 1er septembre avec le support Switch 2.
             // Version MAJEURE, donc on ne l'a pas montee a l'aveugle : verifiee par une COURSE
@@ -372,7 +375,8 @@ namespace Ryujinx.Ava.Systems.AppLibrary
             //
             // CTGPDX n'est pas affecte : IsNextendoVersionOk accepte aussi IsCtgpdxVariant, qui
             // reste sur la base 3.0.3 avec son mod verifie.
-            "0100152000022000" => "4.0.0",  // Mario Kart 8 Deluxe
+            // [Nextendo 2026-10-18] 4.0.1 obligatoire en ligne (serveur MK8 : NEXTENDO_VERSION_MIN=4.0.1).
+            "0100152000022000" => "4.0.1",  // Mario Kart 8 Deluxe
             // [Nextendo 2026-09-06] 13.0.5, publiee le 1er septembre. Elle corrige "un probleme
             // quand des donnees invalides sont envoyees ou recues pendant les combats en ligne",
             // donc elle DURCIT le client : c'etait le candidat evident a une casse. Verifiee le
@@ -392,6 +396,10 @@ namespace Ryujinx.Ava.Systems.AppLibrary
             "0100c2500fc20000" => "11.3.0", // Splatoon 3
             "01008f6008c5e000" => "4.0.0",  // Pokémon Violet
             "0100a3d008c5c000" => "4.0.0",  // Pokémon Scarlet
+            "010028600ebda000" => "1.2.2",  // Super Mario 3D World + Bowser's Fury
+            "0100f43008c44000" => "2.0.2",  // Pokémon Legends: Z-A
+            "0100abf008968000" => "1.3.2",  // Pokémon Sword
+            "01008db008c2c000" => "1.3.2",  // Pokémon Shield
             // [Nextendo 2026-09-08] Super Mario Bros. Wonder. Les correctifs integres (contournement
             // du certificat epingle + deux rejets de nom de pair) sont lies a l'identifiant de build
             // FF773E90972D544EB79406EAA65396D53C43EFB9, propre a cette version exacte : une autre
@@ -400,6 +408,7 @@ namespace Ryujinx.Ava.Systems.AppLibrary
             "01006bd001e06000" => "1.0.17", // Minecraft: Nintendo Switch Edition
             "01009b500007c000" => "5.5.1",  // ARMS
             "0100bde00862a000" => "3.1.1",  // Mario Tennis Aces
+            "0100c9c00e25c000" => "4.0.0",  // Mario Golf: Super Rush
             // [Nextendo 2026-09-20] Crash Team Racing Nitro-Fueled runs on Demonware, not NEX.
             // The built-in patches are keyed to build 1C689518406930512C13DDF4217E7676, which is
             // specific to this exact version; another update would not receive them.
@@ -409,9 +418,10 @@ namespace Ryujinx.Ava.Systems.AppLibrary
             // La table exigeait donc une version impossible et bloquait tout joueur ayant mis a
             // jour l emulateur en 1.8.2 — signale par ffsaga le 2026-09-08.
             "0100277011f1a000" => "1.0.2",  // Super Mario Bros. 35
-            "0100ad9012510000" => "1.0.0",  // Pac-Man 99
+            "0100ad9012510000" => "1.1.0", // Pac-Man 99 (the version the Nextendo servers serve)
             "01009b90006dc000" => "3.0.3",  // Super Mario Maker 2
             "0100000000010000" => "1.4.1",  // Super Mario Odyssey
+            "010001701248c000" => "1.0.4",  // Super Monkey Ball Banana Mania
             _ => "",
         };
 
@@ -480,8 +490,8 @@ namespace Ryujinx.Ava.Systems.AppLibrary
         [JsonIgnore]
         public bool IsCtgpdxVariant => IdBaseString == Mk8dxBaseId && Version == CtgpdxVersion && IsCtgpdxInstalled;
 
-        // Reaches Nextendo online when the installed version is the vanilla compatible version,
-        // OR the CTGPDX variant (MK8DX 3.0.3 + verified CTGPDX).
+        // Reaches Nextendo online when the installed version is exactly the vanilla compatible
+        // version, OR the CTGPDX variant (MK8DX 3.0.3 + verified CTGPDX).
         //
         // Each title has ONE supported version because the NEX access key and the protocol shape
         // are version-specific: a mismatched build doesn't play badly, it fails to talk to the
@@ -495,16 +505,27 @@ namespace Ryujinx.Ava.Systems.AppLibrary
         public bool IsNextendoVersionOk =>
             // [Nextendo] DEV / unstamped local builds skip the exact-version gate so ANY version
             // of a compatible title can be tested online; stamped releases keep the strict check.
-            IsNextendoCompatible && (Version == NextendoCompatibleVersion || IsCtgpdxVariant
-                || !Ryujinx.Common.ReleaseInformation.IsValid);
+            //
+            // [Nextendo 2026-10-19] Version EXACTE de la table, ni avant ni apres : une mise a jour
+            // Nintendo que Nextendo n'a pas encore preparee ne doit pas aller en ligne. La 1.9.6
+            // acceptait aussi les versions plus recentes, c'etait faux. La comparaison numerique
+            // (Ryujinx.Common.NextendoGameVersion.IsExactly) ne sert qu'a normaliser l'ecriture
+            // ("4.0.1" == "4.0.1.0").
+            IsNextendoCompatible && (Ryujinx.Common.NextendoGameVersion.IsExactly(Version, NextendoCompatibleVersion)
+                || IsCtgpdxVariant || !Ryujinx.Common.ReleaseInformation.IsValid);
 
-        // Splatoon 2 uses schedule byaml, while Scarlet and Violet use event BCAT.
+        // Splatoon 2 uses schedule byaml; Scarlet and Violet use event BCAT and Legends: Z-A
+        // and Sword/Shield use it for Nextendo's Mystery Gifts. Switch Sports refuses online without its
+        // Root00 data tables.
+        // Super Smash Bros. Ultimate reads its main menu news ticker (line_news) from it;
+        // without it the ticker says "Connect to the Internet".
         // Only these titles should show the BCAT download action.
         [JsonIgnore]
         public bool RequiresNextendoByaml => IdBaseString switch
         {
             "0100f8f0000a2000" or "01003bc0000a0000" or "01003c700009c800" or
-            "01008f6008c5e000" or "0100a3d008c5c000" => true,
+            "0100c2500fc20000" or "01008f6008c5e000" or "0100a3d008c5c000" or "0100f43008c44000" or
+            "0100d2f00d5c0000" or "0100abf008968000" or "01008db008c2c000" or "01006a800016e000" => true,
             _ => false,
         };
 

@@ -7,7 +7,48 @@ namespace Ryujinx.HLE.HOS.Services.Pctl.ParentalControlServiceFactory
 {
     class IParentalControlService : IpcService
     {
+        // [Nextendo, HOME Menu work] No restriction is set.
+        [CommandCmif(1003)]
+        // ConfirmResumeApplicationPermission(nn::ncm::ApplicationId, ...)
+        public ResultCode ConfirmResumeApplicationPermission(ServiceCtx context)
+        {
+            return ResultCode.Success;
+        }
+
+        [CommandCmif(1010)]
+        // IsRestrictedSystemSettingsEntered() -> bool
+        public ResultCode IsRestrictedSystemSettingsEntered(ServiceCtx context)
+        {
+            context.ResponseData.Write(false);
+
+            return ResultCode.Success;
+        }
+
+        [CommandCmif(1019)] // 20.0.0+
+        // ConfirmLaunchApplicationPermission(...)
+        public ResultCode ConfirmLaunchApplicationPermissionEx(ServiceCtx context)
+        {
+            return ResultCode.Success;
+        }
+
+        [CommandCmif(1451)]
+        // StartPlayTimer()
+        public ResultCode StartPlayTimer(ServiceCtx context)
+        {
+            return ResultCode.Success;
+        }
+
+        [CommandCmif(1452)]
+        // StopPlayTimer()
+        public ResultCode StopPlayTimer(ServiceCtx context)
+        {
+            return ResultCode.Success;
+        }
+
         private readonly ulong _pid;
+        private readonly StubEvent _synchronizationEvent;
+        private readonly StubEvent _playTimerEvent;
+        private readonly StubEvent _unlinkedEvent;
         private readonly int _permissionFlag;
         private ulong _titleId;
         private ParentalControlFlagValue _parentalControlFlag;
@@ -25,6 +66,9 @@ namespace Ryujinx.HLE.HOS.Services.Pctl.ParentalControlServiceFactory
         public IParentalControlService(ServiceCtx context, ulong pid, bool withInitialize, int permissionFlag)
         {
             _pid = pid;
+            _synchronizationEvent = new StubEvent(context);
+            _playTimerEvent = new StubEvent(context);
+            _unlinkedEvent = new StubEvent(context);
             _permissionFlag = permissionFlag;
 
             if (withInitialize)
@@ -261,6 +305,102 @@ namespace Ryujinx.HLE.HOS.Services.Pctl.ParentalControlServiceFactory
             {
                 return ResultCode.Success;
             }
+        }
+        // [Nextendo, HOME Menu work] Parental controls are off: nothing is restricted, no play
+        // timer runs, the console is not linked to the mobile app.
+
+        [CommandCmif(1006)]
+        // IsRestrictionTemporaryUnlocked() -> bool
+        public ResultCode IsRestrictionTemporaryUnlocked(ServiceCtx context)
+        {
+            context.ResponseData.Write(false);
+
+            return ResultCode.Success;
+        }
+
+        [CommandCmif(1432)]
+        // GetSynchronizationEvent() -> handle<copy>
+        public ResultCode GetSynchronizationEvent(ServiceCtx context) { _synchronizationEvent.ReplyWithHandle(context); return ResultCode.Success; }
+
+        [CommandCmif(1453)]
+        // IsPlayTimerEnabled() -> bool
+        public ResultCode IsPlayTimerEnabled(ServiceCtx context)
+        {
+            context.ResponseData.Write(false);
+
+            return ResultCode.Success;
+        }
+
+        [CommandCmif(1454)]
+        // GetPlayTimerRemainingTime() -> nn::TimeSpanType
+        public ResultCode GetPlayTimerRemainingTime(ServiceCtx context)
+        {
+            context.ResponseData.Write(0L);
+
+            return ResultCode.Success;
+        }
+
+        [CommandCmif(1455)]
+        // IsRestrictedByPlayTimer() -> bool
+        public ResultCode IsRestrictedByPlayTimer(ServiceCtx context)
+        {
+            context.ResponseData.Write(false);
+
+            return ResultCode.Success;
+        }
+
+        [CommandCmif(1457)]
+        // GetPlayTimerEventToRequestSuspension() -> handle<copy>
+        public ResultCode GetPlayTimerEventToRequestSuspension(ServiceCtx context) { _playTimerEvent.ReplyWithHandle(context); return ResultCode.Success; }
+
+        [CommandCmif(1458)]
+        // IsPlayTimerAlarmDisabled() -> bool
+        public ResultCode IsPlayTimerAlarmDisabled(ServiceCtx context)
+        {
+            context.ResponseData.Write(false);
+
+            return ResultCode.Success;
+        }
+
+        [CommandCmif(1473)]
+        // GetUnlinkedEvent() -> handle<copy>
+        public ResultCode GetUnlinkedEvent(ServiceCtx context) { _unlinkedEvent.ReplyWithHandle(context); return ResultCode.Success; }
+        [CommandCmif(1032)]
+        // GetSafetyLevel() -> u32
+        public ResultCode GetSafetyLevel(ServiceCtx context)
+        {
+            context.ResponseData.Write(0u);
+
+            return ResultCode.Success;
+        }
+
+        [CommandCmif(1035)]
+        // GetCurrentSettings() -> nn::pctl::RestrictionSettings
+        public ResultCode GetCurrentSettings(ServiceCtx context)
+        {
+            context.ResponseData.Write((byte)0);
+            context.ResponseData.Write(false);
+            context.ResponseData.Write(false);
+
+            return ResultCode.Success;
+        }
+
+        [CommandCmif(1039)]
+        // GetFreeCommunicationApplicationListCount() -> s32
+        public ResultCode GetFreeCommunicationApplicationListCount(ServiceCtx context)
+        {
+            context.ResponseData.Write(0);
+
+            return ResultCode.Success;
+        }
+
+        [CommandCmif(1403)]
+        // IsPairingActive() -> bool
+        public ResultCode IsPairingActive(ServiceCtx context)
+        {
+            context.ResponseData.Write(false);
+
+            return ResultCode.Success;
         }
     }
 }

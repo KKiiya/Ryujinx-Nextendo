@@ -22,6 +22,24 @@ namespace Ryujinx.Graphics.Vulkan
 
         private Image[] _swapchainImages;
         private TextureView[] _swapchainImageViews;
+        private TextureView _overlay;
+
+        public override void SetOverlay(ITexture overlay)
+        {
+            _overlay = overlay as TextureView;
+        }
+
+        private TextureView _notification;
+        private float _notificationX, _notificationY, _notificationWidth, _notificationHeight;
+
+        public override void SetNotification(ITexture notification, float x, float y, float width, float height)
+        {
+            _notification = notification as TextureView;
+            _notificationX = x;
+            _notificationY = y;
+            _notificationWidth = width;
+            _notificationHeight = height;
+        }
 
         private Semaphore[] _imageAvailableSemaphores;
         private Semaphore[] _renderFinishedSemaphores;
@@ -445,6 +463,55 @@ namespace Ryujinx.Graphics.Vulkan
                     new Extents2D(dstX0, dstY1, dstX1, dstY0),
                     _isLinear,
                     true);
+            }
+
+            // [Nextendo, HOME Menu work] The notifications of the system over the frame.
+            if (_overlay != null)
+            {
+                _gd.HelperShader.BlitColor(
+                    _gd,
+                    cbs,
+                    _overlay,
+                    _swapchainImageViews[nextImage],
+                    new Extents2D(0, 0, _overlay.Width, _overlay.Height),
+                    new Extents2D(dstPaddingX, dstPaddingY, _width - dstPaddingX, _height - dstPaddingY),
+                    true,
+                    false,
+                    true);
+            }
+
+            // [Nextendo] A notification of the emulator, where it is in its slide.
+            if (_notification != null && _notificationWidth > 0 && _notificationHeight > 0)
+            {
+                int areaWidth = _width - 2 * dstPaddingX;
+                int areaHeight = _height - 2 * dstPaddingY;
+                int left = dstPaddingX + (int)MathF.Round(_notificationX * areaWidth);
+                int top = dstPaddingY + (int)MathF.Round(_notificationY * areaHeight);
+                int right = left + (int)MathF.Round(_notificationWidth * areaWidth);
+                int bottom = top + (int)MathF.Round(_notificationHeight * areaHeight);
+
+                // The part out of the picture is left out (the slide starts out of it).
+                int srcLeft = 0;
+
+                if (left < dstPaddingX)
+                {
+                    srcLeft = (int)((long)(dstPaddingX - left) * _notification.Width / Math.Max(1, right - left));
+                    left = dstPaddingX;
+                }
+
+                if (right > left && srcLeft < _notification.Width)
+                {
+                    _gd.HelperShader.BlitColor(
+                        _gd,
+                        cbs,
+                        _notification,
+                        _swapchainImageViews[nextImage],
+                        new Extents2D(srcLeft, 0, _notification.Width, _notification.Height),
+                        new Extents2D(left, top, right, bottom),
+                        true,
+                        false,
+                        true);
+                }
             }
 
             Transition(

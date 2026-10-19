@@ -886,6 +886,9 @@ namespace Ryujinx.HLE.HOS.Kernel.SupervisorCall
 
         // Memory
 
+        // [Nextendo, HOME Menu work] NEXTENDO_IPC_TRACE=1 also logs heap sizing and memory queries.
+        private static readonly bool _memTrace = Environment.GetEnvironmentVariable("NEXTENDO_IPC_TRACE") == "1";
+
         [Svc(1)]
         public Result SetHeapSize([PointerSized] out ulong address, [PointerSized] ulong size)
         {
@@ -898,7 +901,14 @@ namespace Ryujinx.HLE.HOS.Kernel.SupervisorCall
 
             KProcess process = KernelStatic.GetCurrentProcess();
 
-            return process.MemoryManager.SetHeapSize(size, out address);
+            Result heapResult = process.MemoryManager.SetHeapSize(size, out address);
+
+            if (_memTrace)
+            {
+                Logger.Notice.Print(LogClass.KernelSvc, $"[mem] SetHeapSize(0x{size:X}) = {heapResult} at 0x{address:X}");
+            }
+
+            return heapResult;
         }
 
         [Svc(2)]
@@ -1365,7 +1375,14 @@ namespace Ryujinx.HLE.HOS.Kernel.SupervisorCall
 
             KProcess process = KernelStatic.GetCurrentProcess();
 
-            return process.MemoryManager.MapPhysicalMemory(address, size);
+            Result mapResult = process.MemoryManager.MapPhysicalMemory(address, size);
+
+            if (_memTrace)
+            {
+                Logger.Notice.Print(LogClass.KernelSvc, $"[mem] MapPhysicalMemory(0x{address:X}, 0x{size:X}) = {mapResult}");
+            }
+
+            return mapResult;
         }
 
         [Svc(0x2d)]
@@ -1785,6 +1802,9 @@ namespace Ryujinx.HLE.HOS.Kernel.SupervisorCall
         [Svc(7)]
         public void ExitProcess()
         {
+            // [Nextendo] A homebrew program says what to start next in the buffers of its loader.
+            KernelStatic.GetCurrentProcess().ReadHomebrewNextLoad();
+
             KernelStatic.GetCurrentProcess().TerminateCurrentProcess();
         }
 
@@ -1894,11 +1914,38 @@ namespace Ryujinx.HLE.HOS.Kernel.SupervisorCall
                     return;
                 }
 
+                // [Nextendo, HOME Menu work] svcBreak(reason, info, size): for an SDK abort, info
+                // points to the failed Result (4 bytes). Naming it turns a blind abort into a lead.
+                try
+                {
+                    ulong infoAddress = currentThread.Context.GetX(1);
+                    ulong infoSize = currentThread.Context.GetX(2);
+                    if (infoSize == 4 && infoAddress != 0)
+                    {
+                        uint code = currentThread.Owner.CpuMemory.Read<uint>(infoAddress);
+                        Logger.Error?.Print(LogClass.KernelSvc, $"Break reason=0x{reason:X} result=0x{code:X} (module {code & 0x1FF}, description {(code >> 9) & 0x1FFF}, {2000 + (code & 0x1FF)}-{(code >> 9) & 0x1FFF:D4})");
+                    }
+                    else
+                    {
+                        Logger.Error?.Print(LogClass.KernelSvc, $"Break reason=0x{reason:X} info=0x{infoAddress:X} size=0x{infoSize:X}");
+                    }
+                }
+                catch { /* Unreadable info: keep the generic message below. */ }
+
                 Logger.Error?.Print(LogClass.KernelSvc, "The guest program broke execution!");
                 Logger.Flush();
 
                 // TODO: Debug events.
                 currentThread.Owner.TerminateCurrentProcess();
+
+                // [Nextendo, HOME Menu work] A program that is not the game (a homebrew in the
+                // album, a system applet) only ends itself, as on a console: the menu, and
+                // hbmenu after a homebrew, carry on. The game alone still stops the emulation.
+                if (currentThread.Owner.HomebrewArea != 0 ||
+                    _context.Device.Processes.ActiveApplication is not { } game || game.ProcessId != currentThread.Owner.Pid)
+                {
+                    return;
+                }
 
                 throw new GuestBrokeExecutionException();
             }
@@ -1914,6 +1961,25 @@ namespace Ryujinx.HLE.HOS.Kernel.SupervisorCall
             KProcess process = KernelStatic.GetCurrentProcess();
 
             string str = MemoryHelper.ReadAsciiString(process.CpuMemory, strPtr, (long)size);
+
+            // [Nextendo, HOME Menu themes] The HOME Menu's themes page is being built: the themes
+            // installed since it started are listed too.
+            if (str == HOS.Themes.QlaunchThemePage.RefreshSignal && HOS.Themes.QlaunchThemePage.Refresh(process))
+            {
+                return;
+            }
+
+            // [Nextendo, HOME Menu work] A choice made in a select box of the HOME Menu's
+            // "Ryujinx | Nextendo" settings.
+            if (str == HOS.Themes.QlaunchSettingsPage.ResultSignal && HOS.Themes.QlaunchThemePage.TakeSettingsResult(process))
+            {
+                return;
+            }
+
+            if (str == "NxSetRst" && HOS.Themes.QlaunchThemePage.TakeRestartAnswer(process))
+            {
+                return;
+            }
 
             Logger.Warning?.Print(LogClass.KernelSvc, str);
         }
@@ -2160,7 +2226,7 @@ namespace Ryujinx.HLE.HOS.Kernel.SupervisorCall
 
                         if (subId != -1 && subId != currentCore)
                         {
-                            return Result.Success;
+                            return TraceInfo(id, subId, value);
                         }
 
                         KScheduler scheduler = _context.Schedulers[currentCore];
@@ -2230,6 +2296,16 @@ namespace Ryujinx.HLE.HOS.Kernel.SupervisorCall
 
                 default:
                     return KernelResult.InvalidEnumValue;
+            }
+
+            return TraceInfo(id, subId, value);
+        }
+
+        private static Result TraceInfo(InfoType id, long subId, ulong value)
+        {
+            if (_memTrace && id != InfoType.RandomEntropy)
+            {
+                Logger.Notice.Print(LogClass.KernelSvc, $"[mem] GetInfo({id}, sub={subId}) = 0x{value:X}");
             }
 
             return Result.Success;
@@ -2534,6 +2610,11 @@ namespace Ryujinx.HLE.HOS.Kernel.SupervisorCall
                 KProcess process = KernelStatic.GetCurrentProcess();
 
                 result = process.HandleTable.GenerateHandle(thread, out handle);
+
+                if (result == Result.Success)
+                {
+                    thread.WriteHandleToThreadLocalRegion(handle);
+                }
             }
             else
             {
@@ -2852,6 +2933,9 @@ namespace Ryujinx.HLE.HOS.Kernel.SupervisorCall
             return WaitSynchronization(out handleIndex, ReadOnlySpan<int>.Empty, timeout);
         }
 
+        private static readonly bool _traceWaits = System.Environment.GetEnvironmentVariable("NEXTENDO_IPC_TRACE") == "1";
+        private static readonly System.Collections.Generic.HashSet<int> _tracedWaits = [];
+
         public Result WaitSynchronization(out int handleIndex, ReadOnlySpan<int> handles, long timeout)
         {
             handleIndex = 0;
@@ -2882,12 +2966,18 @@ namespace Ryujinx.HLE.HOS.Kernel.SupervisorCall
 
                     syncObjs[processedHandles] = syncObj;
 
+                    if (_traceWaits && handles.Length <= 2 && currentThread.HostThread.Name is string waiter && waiter.Contains("InputQueue") && _tracedWaits.Add(System.Runtime.CompilerServices.RuntimeHelpers.GetHashCode(syncObj)))
+                    {
+                        Logger.Notice.Print(LogClass.KernelSvc, $"[waitobj] {waiter} waits on {syncObj.GetType().Name}#{System.Runtime.CompilerServices.RuntimeHelpers.GetHashCode(syncObj):X} (handle 0x{handles[processedHandles]:X})");
+                    }
+
                     syncObj.IncrementReferenceCount();
                 }
 
                 if (processedHandles != handles.Length)
                 {
                     // One or more handles are invalid.
+                    Logger.Warning?.Print(LogClass.KernelSvc, $"[wait] invalid handle 0x{handles[processedHandles]:X} at index {processedHandles} of {handles.Length}");
                     for (int index = 0; index < processedHandles; index++)
                     {
                         currentThread.WaitSyncObjects[index].DecrementReferenceCount();

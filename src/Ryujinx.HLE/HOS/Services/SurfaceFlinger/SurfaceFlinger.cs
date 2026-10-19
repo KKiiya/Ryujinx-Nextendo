@@ -40,6 +40,9 @@ namespace Ryujinx.HLE.HOS.Services.SurfaceFlinger
 
         public long RenderLayerId { get; private set; }
 
+        /// <summary>[Nextendo, HOME Menu work] The layer of the overlay applet, laid over the one on screen.</summary>
+        public long OverlayLayerId { get; private set; }
+
         private class Layer
         {
             public int ProducerBinderId;
@@ -263,6 +266,17 @@ namespace Ryujinx.HLE.HOS.Services.SurfaceFlinger
         {
             lock (_lock)
             {
+                // [Nextendo, HOME Menu work] The overlay applet draws above the others: its layers
+                // never become the one on screen (they are laid over it, see OverlayLayerId).
+                Layer layer = layerId != 0 ? GetLayerByIdLocked(layerId) : null;
+
+                if (layer != null && Am.AppletAE.RealAppletManager.IsOverlay(layer.Owner))
+                {
+                    OverlayLayerId = layerId;
+
+                    return;
+                }
+
                 RenderLayerId = layerId;
             }
         }
@@ -368,6 +382,27 @@ namespace Ryujinx.HLE.HOS.Services.SurfaceFlinger
 
                 Layer layer = GetLayerByIdLocked(RenderLayerId);
 
+                // [Nextendo] A program that is not on screen keeps drawing (a game behind the HOME
+                // Menu): its frames are taken and dropped. Left in its queue, they filled it, the
+                // program waited for a free buffer inside the display server, and that server stopped
+                // answering everybody, the menu included.
+                foreach (KeyValuePair<long, Layer> pair in _layers)
+                {
+                    if (pair.Key != RenderLayerId && pair.Value.Consumer.AcquireBuffer(out BufferItem hidden, 0) == Status.Success)
+                    {
+                        AndroidFence noFence = AndroidFence.NoFence;
+
+                        // The overlay applet's picture (notifications, volume...) is laid over
+                        // the frames; its buffer goes back when the next one comes.
+                        if (pair.Key == OverlayLayerId && EnqueueOverlay(pair.Value, hidden))
+                        {
+                            continue;
+                        }
+
+                        pair.Value.Consumer.ReleaseBuffer(hidden, ref noFence);
+                    }
+                }
+
                 Status acquireStatus = layer.Consumer.AcquireBuffer(out BufferItem item, 0);
 
                 if (acquireStatus == Status.Success)
@@ -399,6 +434,61 @@ namespace Ryujinx.HLE.HOS.Services.SurfaceFlinger
             }
         }
 
+
+        private bool EnqueueOverlay(Layer layer, BufferItem item)
+        {
+            int nvMapHandle = item.GraphicBuffer.Object.Buffer.Surfaces[0].NvMapHandle;
+
+            if (nvMapHandle == 0)
+            {
+                nvMapHandle = item.GraphicBuffer.Object.Buffer.NvMapId;
+            }
+
+            NvMapHandle map = NvMapDeviceFile.GetMapFromHandle(layer.Owner, nvMapHandle);
+
+            if (map == null)
+            {
+                return false;
+            }
+
+            TextureCallbackInformation information = new()
+            {
+                Layer = layer,
+                Item = item,
+            };
+
+            if (item.Fence.FenceCount == 0)
+            {
+                return QueueOverlay(layer, item, map, information);
+            }
+
+            // Read once the GPU is done with it (never waited for on the render thread: the GPU
+            // work of the overlay needs that thread, the wait lasted until its 3 s timeout).
+            item.Fence.RegisterCallback(_device.Gpu, _ =>
+            {
+                if (!QueueOverlay(layer, item, map, information))
+                {
+                    ReleaseBuffer(information);
+                }
+            });
+
+            return true;
+        }
+
+        private bool QueueOverlay(Layer layer, BufferItem item, NvMapHandle map, TextureCallbackInformation information)
+        {
+            return _device.Gpu.Window.SetOverlayThreadSafe(
+                layer.Owner,
+                map.Address + (ulong)item.GraphicBuffer.Object.Buffer.Surfaces[0].Offset,
+                item.GraphicBuffer.Object.Width,
+                item.GraphicBuffer.Object.Height,
+                1 << item.GraphicBuffer.Object.Buffer.Surfaces[0].BlockHeightLog2,
+                ConvertColorFormat(item.GraphicBuffer.Object.Buffer.Surfaces[0].ColorFormat),
+                4,
+                ReleaseBuffer,
+                information);
+        }
+
         private void PostFrameBuffer(Layer layer, BufferItem item)
         {
             int frameBufferWidth = item.GraphicBuffer.Object.Width;
@@ -416,6 +506,11 @@ namespace Ryujinx.HLE.HOS.Services.SurfaceFlinger
             NvMapHandle map = NvMapDeviceFile.GetMapFromHandle(layer.Owner, nvMapHandle);
 
             ulong frameBufferAddress = map.Address + bufferOffset;
+
+            if (System.Environment.GetEnvironmentVariable("NEXTENDO_IPC_TRACE") == "1")
+            {
+                Logger.Notice.Print(LogClass.SurfaceFlinger, $"[fbshare] post frame: handle={nvMapHandle} address=0x{frameBufferAddress:X} {frameBufferWidth}x{frameBufferHeight} fences={item.Fence.FenceCount}");
+            }
 
             Format format = ConvertColorFormat(item.GraphicBuffer.Object.Buffer.Surfaces[0].ColorFormat);
 
@@ -475,6 +570,7 @@ namespace Ryujinx.HLE.HOS.Services.SurfaceFlinger
                 {
                     item.Fence.RegisterCallback(_device.Gpu, (x) =>
                     {
+                        if (System.Environment.GetEnvironmentVariable("NEXTENDO_IPC_TRACE") == "1") Logger.Notice.Print(LogClass.SurfaceFlinger, "[fbshare] fence signalled, frame ready");
                         _device.Gpu.Window.SignalFrameReady();
                         _device.Gpu.GPFifo.Interrupt();
                     });
@@ -482,6 +578,7 @@ namespace Ryujinx.HLE.HOS.Services.SurfaceFlinger
             }
             else
             {
+                if (System.Environment.GetEnvironmentVariable("NEXTENDO_IPC_TRACE") == "1") Logger.Notice.Print(LogClass.SurfaceFlinger, "[fbshare] frame NOT enqueued by the GPU window");
                 ReleaseBuffer(textureCallbackInformation);
             }
         }
@@ -493,6 +590,7 @@ namespace Ryujinx.HLE.HOS.Services.SurfaceFlinger
 
         private void ReleaseBuffer(TextureCallbackInformation information)
         {
+            if (System.Environment.GetEnvironmentVariable("NEXTENDO_IPC_TRACE") == "1") Logger.Notice.Print(LogClass.SurfaceFlinger, "[fbshare] buffer released by the GPU window");
             AndroidFence fence = AndroidFence.NoFence;
 
             information.Layer.Consumer.ReleaseBuffer(information.Item, ref fence);
@@ -505,6 +603,7 @@ namespace Ryujinx.HLE.HOS.Services.SurfaceFlinger
 
         private void AcquireBuffer(TextureCallbackInformation information)
         {
+            if (System.Environment.GetEnvironmentVariable("NEXTENDO_IPC_TRACE") == "1") Logger.Notice.Print(LogClass.SurfaceFlinger, "[fbshare] GPU window acquires the frame (waits for its fence)");
             information.Item.Fence.WaitForever(_device.Gpu);
         }
 

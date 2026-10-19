@@ -21,6 +21,10 @@ namespace Ryujinx.HLE.HOS.Ipc
         public List<IpcBuffDesc> ExchangeBuff { get; private set; }
         public List<IpcRecvListBuffDesc> RecvListBuff { get; private set; }
 
+        // [Nextendo] The pointer buffer of the server (where out-pointer data is put for the
+        // kernel to copy back to the caller), set by the server loop.
+        public ulong ServerPointerBuffer { get; set; }
+
         public List<int> ObjectIds { get; private set; }
 
         public byte[] RawData { get; set; }

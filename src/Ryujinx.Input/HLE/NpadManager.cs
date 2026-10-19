@@ -18,7 +18,7 @@ using Switch = Ryujinx.HLE.Switch;
 
 namespace Ryujinx.Input.HLE
 {
-    public class NpadManager : IDisposable
+    public partial class NpadManager : IDisposable
     {
         private readonly CemuHookClient _cemuHookClient;
 
@@ -376,9 +376,13 @@ namespace Ryujinx.Input.HLE
         {
             _device = device;
             _device.Configuration.RefreshInputConfig = RefreshInputConfigForHLE;
+            HookButtonConfig();
 
             ReloadConfiguration(inputConfig, playerInputAssignments, enableKeyboard, enableMouse);
         }
+
+        /// <summary>[Nextendo] A button of a player's controller (or of its keyboard mapping) is down.</summary>
+        public bool AnyButtonPressed { get; private set; }
 
         public void Update(float aspectRatio = 1)
         {
@@ -442,6 +446,8 @@ namespace Ryujinx.Input.HLE
                 {
                     hleKeyboardInput = NpadController.GetHLEKeyboardInput(_keyboardDriver);
                 }
+
+                AnyButtonPressed = _hleInputStates.Exists(state => state.Buttons != 0);
 
                 _device.Hid.Npads.Update(_hleInputStates);
                 _device.Hid.Npads.UpdateSixAxis(_hleMotionStates);

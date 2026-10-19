@@ -7,7 +7,6 @@ using System.IO;
 using System.IO.Enumeration;
 using System.Net;
 using System.Threading;
-using System.Threading.Tasks;
 
 namespace Ryujinx.HLE.HOS.Services.Sockets.Sfdnsres.Proxy
 {
@@ -156,6 +155,9 @@ namespace Ryujinx.HLE.HOS.Services.Sockets.Sfdnsres.Proxy
             // repondeur NAT ; il partage donc sa variable. Pose AVANT les jokers, sinon
             // *.nintendo.net l attraperait en premier.
             ("g2b309e01-lp1.s.n.srv.nintendo.net", ResolveConfiguredIp("NEXTENDO_NAT_IP")),
+            // Splatoon 2's Pia rendezvous endpoint is served by the NAT responder;
+            // keep it out of the general NEX/backend redirect below.
+            ("g2df33d01-lp1.p.srv.nintendo.net", ResolveConfiguredIp("NEXTENDO_NAT_IP")),
             ("*.nintendo.net",     ResolveConfiguredIp("NEXTENDO_SERVER_IP")),
             ("*.nintendo.com",     ResolveConfiguredIp("NEXTENDO_SERVER_IP")),
             ("*.nintendowifi.net", ResolveConfiguredIp("NEXTENDO_SERVER_IP")),
@@ -165,6 +167,11 @@ namespace Ryujinx.HLE.HOS.Services.Sockets.Sfdnsres.Proxy
             // MatchesSimpleExpression won't match the bare domain against the wildcard, hence both.
             ("demonware.net",      ResolveConfiguredIp("NEXTENDO_SERVER_IP")),
             ("*.demonware.net",    ResolveConfiguredIp("NEXTENDO_SERVER_IP")),
+            // Friday the 13th logs in to IllFonic's own REST backend right after NEX Register.
+            ("nswitch.f13.illfonic.com", ResolveConfiguredIp("NEXTENDO_SERVER_IP")),
+            // Plants vs. Zombies: Battle for Neighborville: only its Blaze redirector and gateways.
+            ("spring18.gosredirector.ea.com", ResolveConfiguredIp("NEXTENDO_SERVER_IP")),
+            ("pvzgw3prodapp-*.ea.com", ResolveConfiguredIp("NEXTENDO_SERVER_IP")),
         };
 
         // Reads a server address from an environment variable; falls back to loopback so no
@@ -385,53 +392,6 @@ namespace Ryujinx.HLE.HOS.Services.Sockets.Sfdnsres.Proxy
                     HostName = host,
                     Aliases = [],
                 };
-            }
-
-            // [Nextendo] Mario Tennis Aces (NEX server id g23932a00) resolves through a real
-            // GeoDNS hostname instead of the fixed NEXTENDO_SERVER_IP, so players get routed to
-            // whichever of the two live Tennis nodes is actually closest to them. Every other
-            // title is unaffected -- the second node doesn't run their servers. Gated on
-            // !NextendoServerOverride.HorsNextendo, not IsActive: IsActive also requires the
-            // typed address to parse, so a fat-fingered custom-server IP would leave IsActive
-            // false and this branch would still fire, sending them to our nameserver and onto
-            // our nodes. HorsNextendo is true as soon as the box is ticked regardless of what
-            // was typed -- exactly the "don't silently put them back on our servers" case its
-            // own doc comment describes, and what every other Nextendo redirect gates on
-            // (caught by Kazu in review). NEXTENDO_TENNIS_GEODNS=0 disables this and falls
-            // through to the normal built-in redirect below. The lookup is bounded to 2s: the
-            // GeoDNS delegation has only one nameserver behind it, and Dns.GetHostEntry has no
-            // native timeout, so an unbounded call here could hang indefinitely if that
-            // nameserver is unreachable. Falls through the same way on any resolution failure or
-            // timeout rather than failing the connection outright.
-            if (!NextendoServerOverride.HorsNextendo &&
-                host.Contains("g23932a00", StringComparison.OrdinalIgnoreCase) &&
-                Environment.GetEnvironmentVariable("NEXTENDO_TENNIS_GEODNS") != "0")
-            {
-                try
-                {
-                    Task<IPHostEntry> lookup = Task.Run(() => Dns.GetHostEntry("tennis-geo.nextendo.network"));
-
-                    if (lookup.Wait(TimeSpan.FromSeconds(2)))
-                    {
-                        IPHostEntry geoEntry = lookup.Result;
-
-                        Logger.Debug?.PrintMsg(LogClass.ServiceBsd, $"Redirecting '{host}' to: {geoEntry.AddressList[0]} (Tennis GeoDNS)");
-                        LastHostForIp[geoEntry.AddressList[0].ToString()] = host;
-
-                        return new IPHostEntry
-                        {
-                            AddressList = geoEntry.AddressList,
-                            HostName = host,
-                            Aliases = [],
-                        };
-                    }
-
-                    Logger.Warning?.PrintMsg(LogClass.ServiceBsd, "Tennis GeoDNS lookup timed out after 2s, falling back to fixed IP");
-                }
-                catch (Exception ex)
-                {
-                    Logger.Warning?.PrintMsg(LogClass.ServiceBsd, $"Tennis GeoDNS lookup failed, falling back to fixed IP: {ex.Message}");
-                }
             }
 
             // [Nextendo] Built-in ordered rules take precedence (deterministic; most

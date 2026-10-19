@@ -100,6 +100,8 @@ namespace Ryujinx.Ava.Systems.Configuration
                 public ReactiveObject<int> WindowPositionX { get; private set; }
                 public ReactiveObject<int> WindowPositionY { get; private set; }
                 public ReactiveObject<bool> WindowMaximized { get; private set; }
+                public ReactiveObject<int> NextendoDashboardWidth { get; private set; }
+                public ReactiveObject<int> NextendoDashboardHeight { get; private set; }
 
                 public WindowStartupSettings()
                 {
@@ -108,6 +110,8 @@ namespace Ryujinx.Ava.Systems.Configuration
                     WindowPositionX = new ReactiveObject<int>();
                     WindowPositionY = new ReactiveObject<int>();
                     WindowMaximized = new ReactiveObject<bool>();
+                    NextendoDashboardWidth = new ReactiveObject<int>();
+                    NextendoDashboardHeight = new ReactiveObject<int>();
                 }
             }
 
@@ -975,6 +979,33 @@ namespace Ryujinx.Ava.Systems.Configuration
             EnableHardwareAcceleration = new ReactiveObject<bool>();
         }
 
+        // [Nextendo] A console that follows the clock of the computer also follows its time
+        // zone: left on the default "UTC", the HOME Menu showed the hour of Greenwich.
+        private static string HostTimeZoneWhenUnset(string configured, bool followsHostClock)
+        {
+            if (!followsHostClock || !string.Equals(configured, "UTC", global::System.StringComparison.OrdinalIgnoreCase))
+            {
+                return configured;
+            }
+
+            try
+            {
+                string id = global::System.TimeZoneInfo.Local.Id;
+
+                if (global::System.TimeZoneInfo.Local.HasIanaId)
+                {
+                    return id;
+                }
+
+                return global::System.TimeZoneInfo.TryConvertWindowsIdToIanaId(id, out string iana) ? iana : configured;
+            }
+            catch (global::System.Exception)
+            {
+                return configured;
+            }
+        }
+
+
         public HleConfiguration CreateHleConfiguration() =>
             new(
                 System.DramSize,
@@ -992,7 +1023,7 @@ namespace Ryujinx.Ava.Systems.Configuration
                 System.MatchSystemTime
                     ? 0
                     : System.SystemTimeOffset,
-                System.TimeZone,
+                HostTimeZoneWhenUnset(System.TimeZone, System.MatchSystemTime),
                 System.MemoryManagerMode,
                 System.IgnoreMissingServices,
                 Graphics.AspectRatio,

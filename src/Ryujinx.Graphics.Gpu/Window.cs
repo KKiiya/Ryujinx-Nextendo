@@ -87,6 +87,20 @@ namespace Ryujinx.Graphics.Gpu
 
         private readonly ConcurrentQueue<PresentationTexture> _frameQueue;
 
+        // [Nextendo, HOME Menu work] The picture of the overlay applet (notifications of the system),
+        // laid over each frame until the next one comes (its buffer is held until then).
+        private PresentationTexture? _overlay;
+        private readonly object _overlayLock = new();
+
+        // [Nextendo] The notification of the emulator: its picture (RGBA, straight alpha), made a
+        // texture on the next frame, and its place (parts of the picture).
+        private byte[] _notificationPixels;
+        private int _notificationPixelsWidth, _notificationPixelsHeight;
+        private ITexture _notificationTexture;
+        private volatile bool _notificationVisible;
+        private float _notificationX, _notificationY, _notificationWidth, _notificationHeight;
+        private readonly object _notificationLock = new();
+
         private int _framesAvailable;
 
         public bool IsFrameAvailable => _framesAvailable != 0;
@@ -189,6 +203,135 @@ namespace Ryujinx.Graphics.Gpu
         }
 
         /// <summary>
+        /// [Nextendo, HOME Menu work] The new picture of the overlay applet, laid over the frames
+        /// from now on; the one before goes back to the applet.
+        /// </summary>
+        public bool SetOverlayThreadSafe(
+            ulong pid,
+            ulong address,
+            int width,
+            int height,
+            int gobBlocksInY,
+            Format format,
+            byte bytesPerPixel,
+            Action<object> releaseCallback,
+            object userObj)
+        {
+            if (!_context.PhysicalMemoryRegistry.TryGetValue(pid, out PhysicalMemory physicalMemory))
+            {
+                return false;
+            }
+
+            FormatInfo formatInfo = new(format, 1, 1, bytesPerPixel, 4);
+
+            TextureInfo info = new(0UL, width, height, 1, 1, 1, 1, 0, false, gobBlocksInY, 1, 1, Target.Texture2D, formatInfo);
+
+            int size = SizeCalculator.GetBlockLinearTextureSize(width, height, 1, 1, 1, 1, 1, bytesPerPixel, gobBlocksInY, 1, 1).TotalSize;
+
+            PresentationTexture overlay = new(physicalMemory.TextureCache, info, new MultiRange(address, (ulong)size), default, null, releaseCallback, userObj);
+            PresentationTexture? previous;
+
+            lock (_overlayLock)
+            {
+                previous = _overlay;
+                _overlay = overlay;
+            }
+
+            previous?.ReleaseCallback(previous.Value.UserObj);
+
+            return true;
+        }
+
+        /// <summary>[Nextendo] The picture of the notification of the emulator (RGBA, straight alpha).</summary>
+        public void SetNotificationPicture(byte[] rgba, int width, int height)
+        {
+            lock (_notificationLock)
+            {
+                _notificationPixels = rgba;
+                _notificationPixelsWidth = width;
+                _notificationPixelsHeight = height;
+            }
+        }
+
+        /// <summary>[Nextendo] Where the notification is (parts of the picture), or hidden.</summary>
+        public void SetNotificationPlace(bool visible, float x, float y, float width, float height)
+        {
+            lock (_notificationLock)
+            {
+                _notificationX = x;
+                _notificationY = y;
+                _notificationWidth = width;
+                _notificationHeight = height;
+                _notificationVisible = visible;
+            }
+        }
+
+        private void SetNotification()
+        {
+            byte[] pixels;
+            int width, height;
+            float x, y, w, h;
+            bool visible;
+
+            lock (_notificationLock)
+            {
+                pixels = _notificationPixels;
+                width = _notificationPixelsWidth;
+                height = _notificationPixelsHeight;
+                _notificationPixels = null;
+                (x, y, w, h, visible) = (_notificationX, _notificationY, _notificationWidth, _notificationHeight, _notificationVisible);
+            }
+
+            if (pixels != null)
+            {
+                _notificationTexture?.Release();
+
+                TextureCreateInfo info = new(width, height, 1, 1, 1, 1, 1, 4, Format.R8G8B8A8Unorm, DepthStencilMode.Depth, Target.Texture2D,
+                    SwizzleComponent.Red, SwizzleComponent.Green, SwizzleComponent.Blue, SwizzleComponent.Alpha);
+
+                _notificationTexture = _context.Renderer.CreateTexture(info);
+                _notificationTexture.SetData(Ryujinx.Common.Memory.MemoryOwner<byte>.RentCopy(pixels));
+            }
+
+            _context.Renderer.Window.SetNotification(visible ? _notificationTexture : null, x, y, w, h);
+        }
+
+        private void SetOverlay()
+        {
+            PresentationTexture? overlay;
+
+            lock (_overlayLock)
+            {
+                overlay = _overlay;
+            }
+
+            if (overlay is not { } pt)
+            {
+                return;
+            }
+
+            try
+            {
+                Image.Texture texture = pt.Cache.FindOrCreateTexture(null, TextureSearchFlags.WithUpscale, pt.Info, 0, range: pt.Range);
+
+                texture.SynchronizeMemory();
+
+                _context.Renderer.Window.SetOverlay(texture.HostTexture);
+            }
+            catch (Exception e)
+            {
+                Ryujinx.Common.Logging.Logger.Warning?.Print(Ryujinx.Common.Logging.LogClass.Gpu, $"[overlay] not laid over the frame: {e.Message}");
+
+                lock (_overlayLock)
+                {
+                    _overlay = null;
+                }
+
+                _context.Renderer.Window.SetOverlay(null);
+            }
+        }
+
+        /// <summary>
         /// Presents a texture on the queue.
         /// If the queue is empty, then no texture is presented.
         /// </summary>
@@ -237,6 +380,9 @@ namespace Ryujinx.Graphics.Gpu
 
                     crop = new ImageCrop(left, right, top, bottom, crop.FlipX, crop.FlipY, crop.IsStretched, crop.AspectRatioX, crop.AspectRatioY);
                 }
+
+                SetOverlay();
+                SetNotification();
 
                 _context.Renderer.Window.Present(texture.HostTexture, crop, swapBuffersCallback);
 

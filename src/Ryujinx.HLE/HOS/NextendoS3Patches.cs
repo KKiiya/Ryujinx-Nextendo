@@ -37,6 +37,17 @@ namespace Ryujinx.HLE.HOS
             0x45, 0x45, 0x4F, 0x46,                   // "EEOF"
         ];
 
+        // Super Mario Party Jamboree 2.3.0, build D70CE1726C979E45ED4200E9C2B23B2A258FDC18.
+        // Selects the gRPC certificate verification callback used by the tested client.
+        // Flat 0xAD38BC: LDRB W10,[X21,#0x38] -> MOV W10,#1; IPS includes the NSO header.
+        private static readonly byte[] _mpjCertificate230 =
+        [
+            0x49, 0x50, 0x53, 0x33, 0x32,
+            0x00, 0xAD, 0x39, 0xBC, 0x00, 0x04,
+            0x2A, 0x00, 0x80, 0x52,
+            0x45, 0x45, 0x4F, 0x46,
+        ];
+
         // Super Mario Bros. Wonder 1.2.1
         // Build FF773E90972D544EB79406EAA65396D53C43EFB9.
         // Flat 0xB03528: LDRB W10,[X21,#0x38] -> MOV W10,#1.
@@ -57,6 +68,18 @@ namespace Ryujinx.HLE.HOS
             0x00, 0x1F, 0xEF, 0xA0, 0x00, 0x04, 0x2A, 0x00, 0x80, 0x52,
             0x00, 0x1F, 0xE5, 0xB4, 0x00, 0x04, 0x1F, 0x20, 0x03, 0xD5,
             0x00, 0x1F, 0xE6, 0x58, 0x00, 0x04, 0x1F, 0x20, 0x03, 0xD5,
+            0x45, 0x45, 0x4F, 0x46,
+        ];
+
+        // Pokémon Legends: Z-A 2.0.2, main build B1F12FD919EAE86AB8A978317677E64BCE443D1F: the same
+        // three checks as Scarlet/Violet (cert LDRB W10,[X21,#0x38] -> MOV W10,#1; peer CBNZ W0 and
+        // B.NE -> NOP).
+        private static readonly byte[] _legendsZaTls202 =
+        [
+            0x49, 0x50, 0x53, 0x33, 0x32,
+            0x02, 0x03, 0xB4, 0xC0, 0x00, 0x04, 0x2A, 0x00, 0x80, 0x52,
+            0x02, 0x03, 0xAA, 0xB8, 0x00, 0x04, 0x1F, 0x20, 0x03, 0xD5,
+            0x02, 0x03, 0xAB, 0xBC, 0x00, 0x04, 0x1F, 0x20, 0x03, 0xD5,
             0x45, 0x45, 0x4F, 0x46,
         ];
 
@@ -172,6 +195,23 @@ namespace Ryujinx.HLE.HOS
         // Overcooked! 2 v1.0.19, certificate and peer hostname patches.
         private static readonly byte[] _overcooked2 = [0x49, 0x50, 0x53, 0x33, 0x32, 0x00, 0x62, 0xF9, 0x70, 0x00, 0x04, 0x2A, 0x00, 0x80, 0x52, 0x00, 0x71, 0xA7, 0x10, 0x00, 0x04, 0x1F, 0x20, 0x03, 0xD5, 0x00, 0x71, 0xA2, 0xE0, 0x00, 0x04, 0xF4, 0x03, 0x1F, 0x2A, 0x45, 0x45, 0x4F, 0x46];
 
+        // [Nextendo, HOME Menu themes] The HOME Menu 22.5.0 (qlaunch, build 26CC3BC5...): room for
+        // the layouts of a custom theme, as NXThemes Installer gives it (the same four bytes it
+        // writes to atmosphere/exefs_patches). Without it, a theme that brings its own home layout
+        // ends the HOME Menu as it starts (a null pointer, found on players who never ran NXThemes
+        // Installer). Flat 0x4F90F4 -> MOV W9,#0x200000; IPS includes the NSO header.
+        private const string HomeMenu2250 = "26CC3BC5AC534AE990B410769736EE81B919C999";
+
+        private static readonly byte[] _homeMenuThemeLayouts =
+        [
+            0x49, 0x50, 0x53, 0x33, 0x32,
+            0x00, 0x4F, 0x91, 0xF4, 0x00, 0x04,
+            0x09, 0x04, 0xA0, 0x52,
+            0x45, 0x45, 0x4F, 0x46,
+        ];
+        // Monster Hunter Rise 16.0.2: the same NPLN patches shipped by Prelude.
+        private static readonly byte[] _rise1602 = [0x49, 0x50, 0x53, 0x33, 0x32, 0x02, 0x03, 0x3C, 0x04, 0x00, 0x04, 0x2A, 0x00, 0x80, 0x52, 0x02, 0x03, 0x2F, 0x28, 0x00, 0x04, 0x1F, 0x20, 0x03, 0xD5, 0x02, 0x03, 0x2F, 0xE8, 0x00, 0x04, 0x1F, 0x20, 0x03, 0xD5, 0x45, 0x45, 0x4F, 0x46];
+
         private static readonly Dictionary<string, byte[][]> _parIdentifiantDeBuild = new()
         {
             ["6830B3A12406CB4716FEC5ADDC35D3E2DC92D212"] = [_contournementCertificat, _nomDePair],
@@ -193,10 +233,13 @@ namespace Ryujinx.HLE.HOS
             // Scarlet 4.0.0: the three original four-byte instructions at the
             // same offsets match Violet 4.0.0 in the decrypted main image.
             ["421C5411B487EB4D049DD065FEC9547773E8E598"] = [_violetTls301],
+            ["B1F12FD919EAE86AB8A978317677E64BCE443D1F"] = [_legendsZaTls202],
             ["44EFA84EE9C32B466EA27215D3D91DFD0EBAE625"] = [_certificatN64v420, _nomDePairN64v420],
+            ["C9A3DD7702075ECD90101F45553895822804D38F"] = [_rise1602],
             ["BCA1A793E41A4836EF3C03286B18E816EEC62338"] = [_certificatPeaceWalker, _nomDePairPeaceWalker],
             ["1C689518406930512C13DDF4217E7676"] = [_ctrConfianceServeur, _ctrRechercheAmis],
             ["616640F27B9362502D1CE10BF01EB9A6"] = [_overcooked2],
+            ["D70CE1726C979E45ED4200E9C2B23B2A258FDC18"] = [_mpjCertificate230],
         };
 
         /// <summary>
@@ -205,6 +248,23 @@ namespace Ryujinx.HLE.HOS
         /// </summary>
         public static int Verser(string identifiantDeBuild, MemPatch cible)
         {
+            if (identifiantDeBuild == HomeMenu2250)
+            {
+                if (Themes.NextendoThemes.Chosen == null)
+                {
+                    return 0;
+                }
+
+                using MemoryStream themeFlux = new(_homeMenuThemeLayouts);
+                using BinaryReader themeLecteur = new(themeFlux);
+
+                new IpsPatcher(themeLecteur).AddPatches(cible);
+
+                Logger.Info?.Print(LogClass.ModLoader, "[theme] HOME Menu: room for the layouts of the theme chosen");
+
+                return 1;
+            }
+
             if (string.IsNullOrEmpty(identifiantDeBuild) ||
                 !_parIdentifiantDeBuild.TryGetValue(identifiantDeBuild, out byte[][] correctifs))
             {

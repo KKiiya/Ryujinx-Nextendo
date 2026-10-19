@@ -1,0 +1,71 @@
+<!-- [Nextendo, HOME Menu work] Les réglages du menu HOME (qLaunch) : démarrage avec l'émulateur,
+     chargement en arrière-plan, plein écran, menu homebrew de l'album, thème. -->
+<window:StyleableAppWindow xmlns="https://github.com/avaloniaui"
+             xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+             xmlns:d="http://schemas.microsoft.com/expression/blend/2008"
+             xmlns:mc="http://schemas.openxmlformats.org/markup-compatibility/2006"
+             xmlns:window="clr-namespace:Ryujinx.Ava.UI.Windows"
+             xmlns:ext="clr-namespace:Ryujinx.Ava.Common.Markup"
+             mc:Ignorable="d"
+             Width="520"
+             Height="640"
+             MinWidth="440"
+             MinHeight="480"
+             x:Class="Ryujinx.Ava.UI.Windows.NextendoHomeMenuWindow">
+    <Grid RowDefinitions="*,Auto">
+    <ScrollViewer Grid.Row="0">
+        <StackPanel Margin="18,18,18,8" Spacing="14">
+            <TextBlock Classes="h1" Text="qLaunch" />
+            <TextBlock TextWrapping="Wrap" Opacity="0.75" FontSize="12"
+                       Text="{ext:Locale Dialog_Nextendo_QLaunchSubtitle}" />
+
+            <StackPanel Spacing="6">
+                <TextBlock FontWeight="SemiBold" Text="{ext:Locale Dialog_Nextendo_QLaunchStartupHeader}" />
+                <CheckBox Name="AutoStartCheck" Content="{ext:Locale Dialog_Nextendo_QLaunchAutoStart}" />
+                <CheckBox Name="BackgroundCheck" Margin="24,0,0,0"
+                          Content="{ext:Locale Dialog_Nextendo_QLaunchBackground}" />
+                <CheckBox Name="FullscreenCheck" Content="{ext:Locale Dialog_Nextendo_QLaunchFullscreen}" />
+                <CheckBox Name="VanillaCheck" Content="{ext:Locale Dialog_Nextendo_QLaunchVanilla}"
+                          ToolTip.Tip="{ext:Locale Dialog_Nextendo_QLaunchVanillaHint}" />
+                <TextBlock Name="FirmwareHint" IsVisible="False" Margin="28,0,0,0" TextWrapping="Wrap"
+                           Foreground="Orange" FontSize="12" />
+                <CheckBox Name="XciCardsCheck" Content="{ext:Locale Dialog_Nextendo_QLaunchXciCards}" />
+            </StackPanel>
+
+            <StackPanel Spacing="6">
+                <TextBlock FontWeight="SemiBold" Text="{ext:Locale Dialog_Nextendo_QLaunchAlbumHeader}" />
+                <RadioButton Name="SphairaRadio" GroupName="AlbumMenu" Content="Sphaira" />
+                <RadioButton Name="HbmenuRadio" GroupName="AlbumMenu" Content="{ext:Locale Dialog_Nextendo_QLaunchHbmenuClassic}" />
+                <TextBlock Name="AlbumHint" TextWrapping="Wrap" Opacity="0.7" FontSize="12" />
+            </StackPanel>
+
+            <StackPanel Spacing="6">
+                <TextBlock FontWeight="SemiBold" Text="{ext:Locale Dialog_Nextendo_QLaunchThemeHeader}" />
+                <RadioButton Name="ThemeAutoRadio" GroupName="Theme" Content="{ext:Locale Dialog_Nextendo_QLaunchThemeAuto}" />
+                <RadioButton Name="ThemeWhiteRadio" GroupName="Theme" Content="{ext:Locale Dialog_Nextendo_QLaunchThemeWhite}" />
+                <RadioButton Name="ThemeBlackRadio" GroupName="Theme" Content="{ext:Locale Dialog_Nextendo_QLaunchThemeBlack}" />
+                <TextBlock TextWrapping="Wrap" Opacity="0.7" FontSize="12"
+                           Text="{ext:Locale Dialog_Nextendo_QLaunchThemeNextStart}" />
+            </StackPanel>
+
+            <StackPanel Spacing="6">
+                <TextBlock FontWeight="SemiBold" Text="{ext:Locale Dialog_Nextendo_QLaunchSdHeader}" />
+                <WrapPanel>
+                    <Button Name="OpenSdButton" Margin="0,0,8,8" Content="{ext:Locale Dialog_Nextendo_QLaunchOpenSd}" />
+                    <Button Name="OpenThemesButton" Margin="0,0,8,8" Content="{ext:Locale Dialog_Nextendo_QLaunchOpenThemes}" />
+                    <Button Name="ResetThemeButton" Margin="0,0,8,8" Content="{ext:Locale Dialog_Nextendo_QLaunchResetTheme}" />
+                </WrapPanel>
+                <TextBlock Name="StatusText" TextWrapping="Wrap" FontSize="12" IsVisible="False" />
+            </StackPanel>
+        </StackPanel>
+    </ScrollViewer>
+
+    <!-- Toujours visibles, hors de la zone qui defile. -->
+    <Border Grid.Row="1" Padding="18,10" BorderThickness="0,1,0,0" BorderBrush="#30FFFFFF">
+        <Grid ColumnDefinitions="*,Auto,Auto">
+            <Button Grid.Column="1" Name="LaunchButton" Margin="0,0,8,0" Classes="accent" Content="{ext:Locale Dialog_Nextendo_QLaunchLaunchButton}" />
+            <Button Grid.Column="2" Name="CloseButton" Content="{ext:Locale Dialog_Nextendo_QLaunchCloseButton}" />
+        </Grid>
+    </Border>
+    </Grid>
+</window:StyleableAppWindow>

@@ -32,6 +32,18 @@ namespace Ryujinx.HLE.HOS.SystemState
             IndirectLayerHandles = new IdDictionary();
         }
 
+        // [Nextendo, HOME Menu work] Taking the foreground the way the system announces it to
+        // an applet: "you come to the foreground" first, "your focus changed" after.
+        public void TakeForeground()
+        {
+            FocusState = FocusState.InFocus;
+
+            Messages.Enqueue(AppletMessage.ChangeIntoForeground);
+            Messages.Enqueue(AppletMessage.FocusStateChanged);
+
+            MessageEvent.ReadableEvent.Signal();
+        }
+
         public void SetFocus(bool isFocused)
         {
             FocusState = isFocused ? FocusState.InFocus : FocusState.OutOfFocus;

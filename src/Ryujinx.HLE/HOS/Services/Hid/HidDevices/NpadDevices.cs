@@ -151,11 +151,84 @@ namespace Ryujinx.HLE.HOS.Services.Hid
             }
         }
 
+        // [Nextendo, HOME Menu work] The interface thread writes the pad states every frame;
+        // a program that activates its pads writes a burst of empty ones from its own service
+        // thread. With two programs running (the HOME Menu and an applet) the two overlapped
+        // and left the state buffers in disorder: one writer at a time.
+        private readonly object _updateLock = new();
+
+        /// <summary>
+        /// [Nextendo, HOME Menu work] Joy-Con attached to the console, whatever the controller
+        /// configured: the initial setup of the firmware waits for them (it shows how to attach
+        /// them). They follow the first controller.
+        /// </summary>
+        public static volatile bool VirtualJoyCons;
+
+        /// <summary>The virtual Joy-Con are taken off the console (on the way to the dock).</summary>
+        public static volatile bool VirtualJoyConsDetached;
+        private ControllerKeys _lastTraced;
+
         public void Update(IList<GamepadInput> states)
+        {
+            lock (_updateLock)
+            {
+                UpdateLocked(states);
+            }
+        }
+
+        private void UpdateLocked(IList<GamepadInput> states)
         {
             Remap();
 
             Span<bool> updated = stackalloc bool[10];
+
+            // [Nextendo, HOME Menu themes] X on the themes page of the HOME Menu: the theme's pages.
+            bool x = false;
+
+            for (int i = 0; i < states.Count; ++i)
+            {
+                x |= states[i].Buttons.HasFlag(ControllerKeys.X);
+            }
+
+            HOS.Themes.QlaunchThemePage.OnPadX(x);
+
+            // ... and B there, back from the pages of a theme to the themes (not given to the HOME Menu).
+            bool b = false;
+
+            for (int i = 0; i < states.Count; ++i)
+            {
+                b |= states[i].Buttons.HasFlag(ControllerKeys.B);
+            }
+
+            if (HOS.Themes.QlaunchThemePage.OnPadB(b))
+            {
+                for (int i = 0; i < states.Count; ++i)
+                {
+                    GamepadInput state = states[i];
+
+                    state.Buttons &= ~ControllerKeys.B;
+                    states[i] = state;
+                }
+            }
+
+            // [Nextendo] The virtual Joy-Con attached to the console get the first controller's input.
+            if (VirtualJoyCons && !VirtualJoyConsDetached && _configuredTypes[(int)PlayerIndex.Handheld] == ControllerType.None && states.Count > 0)
+            {
+                bool handheldGiven = false;
+
+                for (int i = 0; i < states.Count; ++i)
+                {
+                    handheldGiven |= states[i].PlayerId == PlayerIndex.Handheld;
+                }
+
+                if (!handheldGiven)
+                {
+                    GamepadInput mirror = states[0];
+
+                    mirror.PlayerId = PlayerIndex.Handheld;
+                    states = new List<GamepadInput>(states) { mirror };
+                }
+            }
 
             // Update configured inputs
             for (int i = 0; i < states.Count; ++i)
@@ -182,6 +255,12 @@ namespace Ryujinx.HLE.HOS.Services.Hid
             for (int i = 0; i < MaxControllers; ++i)
             {
                 ControllerType config = _configuredTypes[i];
+
+                // [Nextendo] The Joy-Con of the initial setup, attached to the console.
+                if (VirtualJoyCons && !VirtualJoyConsDetached && i == (int)PlayerIndex.Handheld && config == ControllerType.None)
+                {
+                    config = ControllerType.Handheld;
+                }
 
                 // Remove Handheld config when Docked
                 if (config == ControllerType.Handheld && _device.System.State.DockedMode)
@@ -382,6 +461,13 @@ namespace Ryujinx.HLE.HOS.Services.Hid
 
             ref NpadInternalState currentNpad = ref _device.Hid.SharedMemory.Npads[(int)state.PlayerId].InternalState;
 
+            if (state.Buttons != 0 && state.Buttons != _lastTraced)
+            {
+                Ryujinx.Common.Logging.Logger.Notice.Print(Ryujinx.Common.Logging.LogClass.Hid, $"[pad] {state.PlayerId} {state.Buttons}: style={currentNpad.StyleSet} supported={SupportedStyleSets} active={Active} fullkey#={currentNpad.FullKey.GetCurrentEntryRef().SamplingNumber} sysext#={currentNpad.SystemExt.GetCurrentEntryRef().SamplingNumber} handheld#={currentNpad.Handheld.GetCurrentEntryRef().SamplingNumber} attr={currentNpad.FullKey.GetCurrentEntryRef().Attributes} assign={currentNpad.JoyAssignmentMode} dev={currentNpad.DeviceType}");
+            }
+
+            _lastTraced = state.Buttons;
+
             if (currentNpad.StyleSet == NpadStyleTag.None)
             {
                 return;
@@ -391,7 +477,8 @@ namespace Ryujinx.HLE.HOS.Services.Hid
 
             NpadCommonState newState = new()
             {
-                Buttons = (NpadButton)state.Buttons,
+                // [Nextendo, HOME Menu work] Through the button mapping chosen in the HOME Menu.
+                Buttons = NextendoButtonConfig.Apply((int)state.PlayerId, (NpadButton)state.Buttons),
                 AnalogStickL = new AnalogStickState
                 {
                     X = state.LStick.Dx,
@@ -454,6 +541,14 @@ namespace Ryujinx.HLE.HOS.Services.Hid
         }
 
         public void UpdateSixAxis(IList<SixAxisInput> states)
+        {
+            lock (_updateLock)
+            {
+                UpdateSixAxisLocked(states);
+            }
+        }
+
+        private void UpdateSixAxisLocked(IList<SixAxisInput> states)
         {
             Span<bool> updated = stackalloc bool[10];
 

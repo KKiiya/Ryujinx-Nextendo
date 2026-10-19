@@ -20,6 +20,9 @@ namespace Ryujinx.HLE.HOS.Services.Sdb.Pl
 {
     class SharedFontManager
     {
+        /// <summary>[Nextendo] The standard font of the console (TTF), once read; null before.</summary>
+        public static byte[] StandardFont { get; private set; }
+
         private const uint FontKey = 0x06186249;
         private const uint BFTTFMagic = 0x18029a7f;
 
@@ -48,9 +51,10 @@ namespace Ryujinx.HLE.HOS.Services.Sdb.Pl
 
         public void Initialize()
         {
-            _fontData?.Clear();
-            _fontData = null;
-
+            // [Nextendo, HOME Menu work] Called again whenever a process starts (the HOME Menu's
+            // applets): the fonts in the shared memory were then wiped and written again while
+            // the HOME Menu drew text with them, and it stopped on a glyph read as zeros. They do
+            // not change while the emulation runs (a new one has a new manager): kept once loaded.
         }
 
         public void EnsureInitialized(ContentManager contentManager)
@@ -82,6 +86,18 @@ namespace Ryujinx.HLE.HOS.Services.Sdb.Pl
                                 romfs.OpenFile(ref fontFile.Ref, ("/" + fontFilename).ToU8Span(), OpenMode.Read).ThrowIfFailure();
 
                                 data = DecryptFont(fontFile.Get.AsStream());
+
+                                if (name == "FontNintendoExtended")
+                                {
+                                    data = ControllerButtonFont.Apply(data);
+                                }
+
+                                // [Nextendo] The console's own letters, for the texts the emulator
+                                // paints into the HOME Menu (the detail of a friend's game).
+                                if (name == "FontStandard")
+                                {
+                                    StandardFont = data;
+                                }
                             }
 
                             FontInfo info = new((int)fontOffset, data.Length);
@@ -95,6 +111,21 @@ namespace Ryujinx.HLE.HOS.Services.Sdb.Pl
                             for (; fontOffset - start < data.Length; fontOffset++)
                             {
                                 _storage.GetRef<byte>(fontOffset) = data[fontOffset - start];
+                            }
+
+                            if (name == "FontNintendoExtended")
+                            {
+                                // [Nextendo] The font of another kind of controller, written over this one
+                                // while the console runs (same size, see ControllerButtonFont).
+                                int length = data.Length;
+
+                                ControllerButtonFont.Rewrite = font =>
+                                {
+                                    for (int i = 0; i < length && i < font.Length; i++)
+                                    {
+                                        _storage.GetRef<byte>((ulong)(start + i)) = font[i];
+                                    }
+                                };
                             }
 
                             return info;

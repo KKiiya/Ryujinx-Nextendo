@@ -11,6 +11,8 @@ using Ryujinx.Memory;
 using System;
 using System.Collections.Generic;
 using System.Linq;
+using System.Runtime.InteropServices;
+using System.Security.Cryptography;
 using System.Threading;
 using ExceptionCallback = Ryujinx.Cpu.ExceptionCallback;
 using ExceptionCallbackNoArgs = Ryujinx.Cpu.ExceptionCallbackNoArgs;
@@ -55,6 +57,47 @@ namespace Ryujinx.HLE.HOS.Kernel.Process
 
         public string Name { get; private set; }
 
+        /// <summary>
+        /// [Nextendo, diagnostics] The guest threads of the process: where each one is (its state,
+        /// its stack trace), to see what a frozen program waits for.
+        /// </summary>
+        public string DescribeGuestThreads()
+        {
+            List<KThread> threads = [];
+
+            KernelContext.CriticalSection.Enter();
+
+            foreach (KThread thread in _threads)
+            {
+                threads.Add(thread);
+            }
+
+            KernelContext.CriticalSection.Leave();
+
+            System.Text.StringBuilder text = new();
+
+            foreach (KThread thread in threads)
+            {
+                if (thread.HostThread == null || thread.HostThread.Name?.StartsWith("HLE.OsThread") == true)
+                {
+                    continue;
+                }
+
+                text.Append($"--- thread {thread.ThreadUid} ({thread.HostThread.Name}) state={thread.SchedFlags}\n");
+
+                try
+                {
+                    text.Append(thread.GetGuestStackTrace()).Append('\n');
+                }
+                catch (Exception e)
+                {
+                    text.Append($"(no stack trace: {e.Message})\n");
+                }
+            }
+
+            return text.ToString();
+        }
+
         private int _threadCount;
 
         public ProcessCreationFlags Flags { get; private set; }
@@ -66,6 +109,10 @@ namespace Ryujinx.HLE.HOS.Kernel.Process
         public bool AllowCodeMemoryForJit { get; private set; }
 
         public ulong TitleId { get; private set; }
+
+        /// <summary>[Nextendo] The last request of the program to a service (Stopwatch ticks), and their number.</summary>
+        public long LastRequestAt { get; set; }
+        public long Requests { get; set; }
         public bool IsApplication { get; private set; }
         public ulong Pid { get; private set; }
 
@@ -262,6 +309,7 @@ namespace Ryujinx.HLE.HOS.Kernel.Process
 
             if (result != Result.Success)
             {
+                Ryujinx.Common.Logging.Logger.Error?.Print(Ryujinx.Common.Logging.LogClass.Kernel, $"[proc] InitializeForProcess failed: {result} code=0x{codeAddress:X} size=0x{codeSize:X} flags={creationInfo.Flags}");
                 CleanUpForError();
 
                 return result;
@@ -282,6 +330,7 @@ namespace Ryujinx.HLE.HOS.Kernel.Process
 
             if (result != Result.Success)
             {
+                Ryujinx.Common.Logging.Logger.Error?.Print(Ryujinx.Common.Logging.LogClass.Kernel, $"[proc] MapPages(code) failed: {result} code=0x{codeAddress:X} pages={codePagesCount} region={memRegion} free={string.Join(",", System.Linq.Enumerable.Select(KernelContext.MemoryManager.MemoryRegions, r => r.GetFreePages()))}");
                 CleanUpForError();
 
                 return result;
@@ -518,9 +567,96 @@ namespace Ryujinx.HLE.HOS.Kernel.Process
             return result;
         }
 
-        private static void GenerateRandomEntropy()
+        private void GenerateRandomEntropy()
         {
-            // TODO.
+            // Keep the seed stable for this process. Guest SDKs use GetInfo(RandomEntropy)
+            // to seed their PRNG, including the UUIDs stored in Mario Party Superstars saves.
+            RandomNumberGenerator.Fill(MemoryMarshal.AsBytes(RandomEntropy.AsSpan()));
+        }
+
+        // ---------------------------------------------------------------------------------
+        // [Nextendo] The loader side of the homebrew ABI (switchbrew, "Homebrew ABI").
+        // A program started with HomebrewArguments set receives a list of configuration entries
+        // instead of the bare arguments of a system program; among them two buffers where it
+        // writes, before it exits, the program to start next (how the homebrew menu launches
+        // a homebrew).
+        private const ulong HomebrewAreaSize = 0x1000;
+        private const ulong HomebrewPathOffset = 0x200;     // 0x200 bytes
+        private const ulong HomebrewNextArgvOffset = 0x400; // 0x800 bytes
+        private const ulong HomebrewArgvOffset = 0xC00;     // 0x300 bytes
+        private const ulong HomebrewInfoOffset = 0xF00;
+        private const ulong HomebrewReturnOffset = 0xF80;
+
+        /// <summary>Command line of the homebrew program; non null asks for a homebrew start.</summary>
+        public string HomebrewArguments { get; set; }
+
+        public ulong HomebrewArea { get; private set; }
+
+        /// <summary>What the program asked to be started next, read when it exits.</summary>
+        public string HomebrewNextPath { get; private set; }
+        public string HomebrewNextArguments { get; private set; }
+
+        private void WriteHomebrewEnvironment(int mainThreadHandle)
+        {
+            byte[] area = new byte[HomebrewAreaSize];
+            int at = 0;
+
+            void Entry(uint key, ulong first, ulong second)
+            {
+                BitConverter.TryWriteBytes(area.AsSpan(at, 4), key);
+                BitConverter.TryWriteBytes(area.AsSpan(at + 8, 8), first);
+                BitConverter.TryWriteBytes(area.AsSpan(at + 16, 8), second);
+
+                at += 0x18;
+            }
+
+            byte[] arguments = System.Text.Encoding.UTF8.GetBytes(HomebrewArguments);
+            byte[] info = System.Text.Encoding.ASCII.GetBytes("Nextendo homebrew loader");
+
+            arguments.AsSpan(0, Math.Min(arguments.Length, 0x2FF)).CopyTo(area.AsSpan((int)HomebrewArgvOffset));
+            info.CopyTo(area.AsSpan((int)HomebrewInfoOffset));
+
+            Entry(1, (ulong)(uint)mainThreadHandle, 0);                                         // MainThreadHandle
+            Entry(2, HomebrewArea + HomebrewPathOffset, HomebrewArea + HomebrewNextArgvOffset); // NextLoadPath
+            Entry(5, 0, HomebrewArea + HomebrewArgvOffset);                                     // Argv
+            Entry(6, ulong.MaxValue, ulong.MaxValue);                                           // SyscallAvailableHint
+            Entry(7, 0, 0);                                                                     // AppletType: application
+            Entry(10, 0xFFFF8001, 0);                                                           // ProcessHandle (own process)
+            Entry(11, 0, 0);                                                                    // LastLoadResult
+            Entry(14, (ulong)Random.Shared.NextInt64(), (ulong)Random.Shared.NextInt64());      // RandomSeed
+            Entry(0, HomebrewArea + HomebrewInfoOffset, (ulong)info.Length);                    // EndOfList
+
+            // svc #7 (ExitProcess), then a branch to itself.
+            BitConverter.TryWriteBytes(area.AsSpan((int)HomebrewReturnOffset, 4), 0xD40000E1u);
+            BitConverter.TryWriteBytes(area.AsSpan((int)HomebrewReturnOffset + 4, 4), 0x14000000u);
+
+            CpuMemory.Write(HomebrewArea, area);
+        }
+
+        /// <summary>Reads the "start this next" buffers; called when the program exits.</summary>
+        public void ReadHomebrewNextLoad()
+        {
+            if (HomebrewArea == 0)
+            {
+                return;
+            }
+
+            try
+            {
+                static string Text(ReadOnlySpan<byte> raw)
+                {
+                    int end = raw.IndexOf((byte)0);
+
+                    return System.Text.Encoding.UTF8.GetString(end < 0 ? raw : raw[..end]);
+                }
+
+                HomebrewNextPath = Text(CpuMemory.GetSpan(HomebrewArea + HomebrewPathOffset, 0x200));
+                HomebrewNextArguments = Text(CpuMemory.GetSpan(HomebrewArea + HomebrewNextArgvOffset, 0x800));
+            }
+            catch (Exception)
+            {
+                HomebrewNextPath = null;
+            }
         }
 
         public Result Start(int mainThreadPriority, ulong stackSize)
@@ -654,10 +790,20 @@ namespace Ryujinx.HLE.HOS.Kernel.Process
 
                 mainThread = new KThread(KernelContext);
 
+                // [Nextendo] A homebrew program started the way the homebrew loader starts it:
+                // the top of its stack holds the configuration of the loader (see HomebrewArguments).
+                ulong threadStackTop = stackTop;
+
+                if (HomebrewArguments != null && _mainThreadStackSize >= 0x10000)
+                {
+                    threadStackTop -= HomebrewAreaSize;
+                    HomebrewArea = threadStackTop;
+                }
+
                 result = mainThread.Initialize(
                     _entrypoint,
                     0,
-                    stackTop,
+                    threadStackTop,
                     mainThreadPriority,
                     DefaultCpuCore,
                     this,
@@ -680,7 +826,24 @@ namespace Ryujinx.HLE.HOS.Kernel.Process
                     return result;
                 }
 
-                mainThread.SetEntryArguments(0, mainThreadHandle);
+                if (HomebrewArea != 0)
+                {
+                    WriteHomebrewEnvironment(mainThreadHandle);
+
+                    // X0 = the configuration, X1 = -1: "started by a loader".
+                    mainThread.Context.SetX(0, HomebrewArea);
+                    mainThread.Context.SetX(1, ulong.MaxValue);
+
+                    // The program returns to its loader when it is done: to two instructions
+                    // that end the process.
+                    mainThread.Context.SetX(30, HomebrewArea + HomebrewReturnOffset);
+                }
+                else
+                {
+                    mainThread.SetEntryArguments(0, mainThreadHandle);
+                }
+
+                mainThread.WriteHandleToThreadLocalRegion(mainThreadHandle);
 
                 ProcessState oldState = State;
                 ProcessState newState = State != ProcessState.Created
@@ -1047,6 +1210,43 @@ namespace Ryujinx.HLE.HOS.Kernel.Process
             SetState(ProcessState.Exited);
 
             KernelContext.CriticalSection.Leave();
+
+            // [Nextendo, HOME Menu work] With the HOME Menu, applets and games come and go in one
+            // emulation: an exited process is never destroyed (references stay behind), and its
+            // address space kept two of the regions the fault handler can watch until none were
+            // left ("Number of allowed tracked regions exceeded" when the next applet started).
+            // Freed a moment after the exit, once its threads are surely out of it.
+            if (HomeMenuStatus.Running)
+            {
+                System.Threading.Tasks.Task.Delay(3000).ContinueWith(_ =>
+                {
+                    if (State == ProcessState.Exited)
+                    {
+                        DisposeContext("exited");
+                    }
+                });
+            }
+        }
+
+        private int _contextDisposed;
+
+        private void DisposeContext(string why)
+        {
+            if (System.Threading.Interlocked.Exchange(ref _contextDisposed, 1) != 0)
+            {
+                return;
+            }
+
+            Ryujinx.Common.Logging.Logger.Notice.Print(Ryujinx.Common.Logging.LogClass.Kernel, $"[home] process {Pid} ({TitleId:X16}) {why}: address space freed");
+
+            try
+            {
+                Context.Dispose();
+            }
+            catch (Exception e)
+            {
+                Ryujinx.Common.Logging.Logger.Warning?.Print(Ryujinx.Common.Logging.LogClass.Kernel, $"[home] process {Pid}: {e.Message}");
+            }
         }
 
         public Result ClearIfNotExited()
@@ -1101,6 +1301,24 @@ namespace Ryujinx.HLE.HOS.Kernel.Process
 
             Logger.Flush();
 
+            // [Nextendo, HOME Menu work] An applet of the HOME Menu that crashes ends alone: the
+            // HOME Menu sees it exit and comes back, as on the console, instead of the whole
+            // emulator closing. The thread that faulted cannot go on (it is in the middle of an
+            // instruction): its program is ended from here and the thread never runs again.
+            KThread faulting = KernelStatic.GetCurrentThread();
+
+            if (faulting?.Owner is { } crashed && Services.Am.AppletAE.RealAppletManager.TryGet(crashed.Pid, out _))
+            {
+                Logger.Error?.Print(LogClass.ServiceAm, $"[applet] program {crashed.TitleId:X16} (process {crashed.Pid}) crashed: it is closed, the HOME Menu goes on");
+                Logger.Flush();
+
+                System.Threading.Thread.CurrentThread.IsBackground = true;
+
+                crashed.TerminateCurrentProcess();
+
+                System.Threading.Thread.Sleep(System.Threading.Timeout.Infinite);
+            }
+
             return false;
         }
 
@@ -1145,7 +1363,7 @@ namespace Ryujinx.HLE.HOS.Kernel.Process
             throw new UndefinedInstructionException(address, opCode);
         }
 
-        protected override void Destroy() => Context.Dispose();
+        protected override void Destroy() => DisposeContext("destroyed");
 
         public Result SetActivity(bool pause)
         {

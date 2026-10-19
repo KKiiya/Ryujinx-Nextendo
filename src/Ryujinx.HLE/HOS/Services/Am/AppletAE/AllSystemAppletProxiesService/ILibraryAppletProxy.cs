@@ -16,7 +16,7 @@ namespace Ryujinx.HLE.HOS.Services.Am.AppletAE.AllSystemAppletProxiesService
         // GetCommonStateGetter() -> object<nn::am::service::ICommonStateGetter>
         public ResultCode GetCommonStateGetter(ServiceCtx context)
         {
-            MakeObject(context, new ICommonStateGetter(context));
+            MakeObject(context, new ICommonStateGetter(context, _pid));
 
             return ResultCode.Success;
         }
@@ -52,7 +52,7 @@ namespace Ryujinx.HLE.HOS.Services.Am.AppletAE.AllSystemAppletProxiesService
         // GetDisplayController() -> object<nn::am::service::IDisplayController>
         public ResultCode GetDisplayController(ServiceCtx context)
         {
-            MakeObject(context, new IDisplayController(context));
+            MakeObject(context, new IDisplayController(context, _pid));
 
             return ResultCode.Success;
         }
@@ -61,7 +61,7 @@ namespace Ryujinx.HLE.HOS.Services.Am.AppletAE.AllSystemAppletProxiesService
         // GetProcessWindingController() -> object<nn::am::service::IProcessWindingController>
         public ResultCode GetProcessWindingController(ServiceCtx context)
         {
-            MakeObject(context, new IProcessWindingController());
+            MakeObject(context, new IProcessWindingController(_pid));
 
             return ResultCode.Success;
         }
@@ -70,7 +70,7 @@ namespace Ryujinx.HLE.HOS.Services.Am.AppletAE.AllSystemAppletProxiesService
         // GetLibraryAppletCreator() -> object<nn::am::service::ILibraryAppletCreator>
         public ResultCode GetLibraryAppletCreator(ServiceCtx context)
         {
-            MakeObject(context, new ILibraryAppletCreator());
+            MakeObject(context, new ILibraryAppletCreator(_pid));
 
             return ResultCode.Success;
         }
@@ -98,6 +98,23 @@ namespace Ryujinx.HLE.HOS.Services.Am.AppletAE.AllSystemAppletProxiesService
         public ResultCode GetDebugFunctions(ServiceCtx context)
         {
             MakeObject(context, new IDebugFunctions());
+
+            return ResultCode.Success;
+        }
+        [CommandCmif(22)]
+        // GetHomeMenuFunctions() -> object<nn::am::service::IHomeMenuFunctions>
+        public ResultCode GetHomeMenuFunctions(ServiceCtx context)
+        {
+            MakeObject(context, new IHomeMenuFunctions(context.Device.System));
+
+            return ResultCode.Success;
+        }
+
+        [CommandCmif(23)]
+        // GetGlobalStateController() -> object<nn::am::service::IGlobalStateController>
+        public ResultCode GetGlobalStateController(ServiceCtx context)
+        {
+            MakeObject(context, new IGlobalStateController());
 
             return ResultCode.Success;
         }

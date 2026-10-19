@@ -48,6 +48,7 @@ namespace Ryujinx.HLE.HOS.Services
         private KProcess _selfProcess;
         private KThread _selfThread;
         private KEvent _wakeEvent;
+        private int _receiveErrors;
         private int _wakeHandle = 0;
 
         private readonly ReaderWriterLockSlim _handleLock = new();
@@ -154,7 +155,12 @@ namespace Ryujinx.HLE.HOS.Services
             // Ensure that the sever loop is running.
             InitDone.WaitOne();
 
-            _selfProcess.HandleTable.GenerateHandle(serverSession, out int serverSessionHandle);
+            Ryujinx.Horizon.Common.Result generated = _selfProcess.HandleTable.GenerateHandle(serverSession, out int serverSessionHandle);
+
+            if (generated != Ryujinx.Horizon.Common.Result.Success)
+            {
+                Logger.Error?.Print(LogClass.KernelIpc, $"Server {Name}: no handle left for a new session ({generated}), {_sessions.Count} sessions held.");
+            }
 
             AddSessionObj(serverSessionHandle, obj);
         }
@@ -185,6 +191,24 @@ namespace Ryujinx.HLE.HOS.Services
         public void SignalWake()
         {
             _wakeEvent?.WritableEvent.Signal();
+        }
+
+        private IpcService TryGetSessionObj(int serverSessionHandle)
+        {
+            bool lockTaken = false;
+            try
+            {
+                lockTaken = _handleLock.TryEnterReadLock(Timeout.Infinite);
+
+                return _sessions.TryGetValue(serverSessionHandle, out IpcService obj) ? obj : null;
+            }
+            finally
+            {
+                if (lockTaken)
+                {
+                    _handleLock.ExitReadLock();
+                }
+            }
         }
 
         private IpcService GetSessionObj(int serverSessionHandle)
@@ -322,6 +346,11 @@ namespace Ryujinx.HLE.HOS.Services
 
                 _selfThread.HandlePostSyscall();
 
+                if (rc != Result.Success && rc != KernelResult.TimedOut && rc != KernelResult.PortRemoteClosed && _receiveErrors++ < 5)
+                {
+                    Logger.Error?.Print(LogClass.KernelIpc, $"Server {Name}: waiting on {handleCount} handles failed with {rc}.");
+                }
+
                 if (!_selfThread.Context.Running)
                 {
                     break;
@@ -370,7 +399,10 @@ namespace Ryujinx.HLE.HOS.Services
                             _wakeEvent.WritableEvent.Clear();
                         }
                     }
-                    else if (rc == KernelResult.PortRemoteClosed && signaledIndex >= 0 && SmObjectFactory != null)
+                    // [Nextendo] A session whose client is gone is dropped on every server, not only on sm:
+                    // with programs that start and end next to the HOME Menu, a closed session left in the
+                    // list answered every wait at once, for ever, and the server stopped hearing the others.
+                    else if (rc == KernelResult.PortRemoteClosed && signaledIndex >= portHandleCount + 1)
                     {
                         DestroySession(handles[signaledIndex]);
                     }
@@ -398,6 +430,17 @@ namespace Ryujinx.HLE.HOS.Services
 
             if (RemoveSessionObj(serverSessionHandle, out IpcService session))
             {
+                // [Nextendo] The objects opened through that session go with it (a save data file
+                // system left open by a killed applet stayed locked for the next one).
+                try
+                {
+                    session.ReleaseDomainObjects();
+                }
+                catch (Exception e)
+                {
+                    Logger.Warning?.Print(LogClass.KernelIpc, $"Server {Name}: objects of a closed session not released ({e.Message}).");
+                }
+
                 (session as IDisposable)?.Dispose();
             }
         }
@@ -405,6 +448,8 @@ namespace Ryujinx.HLE.HOS.Services
         private bool Process(int serverSessionHandle, ulong recvListAddr)
         {
             IpcMessage request = ReadRequest();
+
+            request.ServerPointerBuffer = recvListAddr;
 
             IpcMessage response = new();
 
@@ -456,7 +501,11 @@ namespace Ryujinx.HLE.HOS.Services
                     request,
                     response,
                     _requestDataReader,
-                    _responseDataWriter);
+                    _responseDataWriter)
+                {
+                    OutputPointerBufferAddress = recvListAddr,
+                    OutputPointerBufferSize = PointerBufferSize,
+                };
 
                 GetSessionObj(serverSessionHandle).CallCmifMethod(context);
 
@@ -497,6 +546,11 @@ namespace Ryujinx.HLE.HOS.Services
             else if (request.Type is IpcMessageType.CmifControl or
                      IpcMessageType.CmifControlWithContext)
             {
+                if (System.Environment.GetEnvironmentVariable("NEXTENDO_IPC_TRACE") == "1")
+                {
+                    Logger.Notice.Print(LogClass.KernelIpc, $"[ctl] {Name}: control request on session 0x{serverSessionHandle:X}, {_sessions.Count} sessions");
+                }
+
 #pragma warning disable IDE0059 // Remove unnecessary value assignment
                 uint magic = (uint)_requestDataReader.ReadUInt64();
 #pragma warning restore IDE0059
@@ -622,6 +676,18 @@ namespace Ryujinx.HLE.HOS.Services
                 {
                     DeferredPoll deferred = _deferredPolls[i];
 
+                    // [Nextendo] The session is gone: the game that polled has ended (closed from the
+                    // HOME Menu while its network was waiting). Nobody waits for this reply any more;
+                    // re-running it took the whole emulator down (KeyNotFoundException).
+                    IpcService sessionObj = TryGetSessionObj(deferred.SessionHandle);
+
+                    if (sessionObj == null)
+                    {
+                        _deferredPolls.RemoveAt(i);
+
+                        continue;
+                    }
+
                     // Re-run the captured Poll request in force-non-blocking mode. This recomputes
                     // outputBufferPosition/events/eventsByPollManager/fdsCount identically from the same
                     // request and writes the revents into GUEST memory itself.
@@ -653,7 +719,7 @@ namespace Ryujinx.HLE.HOS.Services
                         PollInputSnapshot = deferred.InputSnapshot,
                     };
 
-                    GetSessionObj(deferred.SessionHandle).CallCmifMethod(context);
+                    sessionObj.CallCmifMethod(context);
 
                     bool deadlineElapsed = PerformanceCounter.ElapsedMilliseconds >= deferred.DeadlineMs;
 
