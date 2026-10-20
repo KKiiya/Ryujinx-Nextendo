@@ -1,8 +1,12 @@
 using Avalonia.Controls;
 using Avalonia.Interactivity;
+using Avalonia.Media.Imaging;
+using Avalonia.Platform;
 using Avalonia.Threading;
 using Ryujinx.Ava.Common.Locale;
 using Ryujinx.Ava.UI.Windows;
+using System;
+using System.IO;
 using System.Threading.Tasks;
 
 namespace Ryujinx.Ava.UI.Applet
@@ -18,6 +22,7 @@ namespace Ryujinx.Ava.UI.Applet
             Message = message;
             DataContext = this;
             InitializeComponent();
+            SetNextendoWindowIcon();
 
             int responseId = 0;
 
@@ -39,6 +44,21 @@ namespace Ryujinx.Ava.UI.Applet
         {
             DataContext = this;
             InitializeComponent();
+            SetNextendoWindowIcon();
+        }
+
+        private void SetNextendoWindowIcon()
+        {
+            // [Nextendo] Une icône manquante ne doit jamais empêcher d'afficher l'erreur du jeu.
+            try
+            {
+                using Stream iconStream = AssetLoader.Open(new Uri("resm:Ryujinx.Assets.UIImages.Logo_Nextendo_Window.png?assembly=Ryujinx"));
+                Icon = new Bitmap(iconStream);
+            }
+            catch (Exception)
+            {
+                // icône par défaut
+            }
         }
 
         public string Message { get; set; }
